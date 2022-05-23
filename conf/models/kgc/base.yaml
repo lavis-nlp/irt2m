@@ -1,0 +1,62 @@
+# dataset seed for reproducibility
+dataset seed: 5012022
+# pykeen creates a seed if set to null
+pykeen seed: null
+
+# set aside 20% for validation
+ratio: 0.1
+
+# available format keys:
+#   dataset: the (normalised) upstream IRT2.name property (e.g. irt2-cde-l)
+#   date: start datetime formatted as %Y-%m-%d_%H-%M-%S
+#   model: the KGC model as configured in pipeline.model
+out: data/models/kgc/{dataset}.{model}/{date}
+
+# directly handed over to the pykeen pipeline
+pipeline:
+  use_testing_data: false
+
+  result_tracker: wandb
+  result_tracker_kwargs:
+    project: irt2-kgc
+    offline: false
+
+  stopper: early
+  stopper_kwargs:
+    frequency: 5
+    patience: 5
+    relative_delta: 0.001
+
+  training_kwargs:
+    # which is merely the maximum
+    # because of early stopping
+    num_epochs: 2000
+
+  optimizer: Adagrad
+  regularizer: LPRegularizer
+
+  # following parameters may be overwritten
+  # by cli arguments for hyperparameter searches
+
+  # cli: --regularizer-weight
+  regularizer_kwargs:
+    weight: 0.1
+
+  # cli: --learning-rate
+  optimizer_kwargs:
+    lr: 0.1
+
+  # set in models/*yaml
+  # cli: --embedding-dim
+  # model_kwargs:
+  #   embedding_dim: 500
+
+  # set in models/*yaml
+  # cli: --loss
+  # loss: CrossEntropyLoss
+
+  # set in models/*slcwa.yaml
+  # only for slcwa trainings
+  # cli: --negatives
+  # negative_sampler_kwargs:
+  #   num_negs_per_pos: 5

@@ -11,7 +11,8 @@ formatters:
 handlers:
   logfile:
     class: logging.FileHandler
-    filename: irt2m.log
+    # provided: ENV (see irt2m/__init__.py)
+    filename: "{ENV.DIR.DATA}/irt2m.log"
     formatter: standard
   stdout:
     class: logging.StreamHandler
@@ -23,3 +24,5 @@ loggers:
     level: INFO
     handlers:
       - logfile
+  pykeen:
+    level: DEBUG

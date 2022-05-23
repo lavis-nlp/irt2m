@@ -48,6 +48,7 @@ def main():
     """Use irt2m from the command line."""
     log.info(" · IRT2M CLI ·")
     log.info(f"initialized root path: {irt2m.ENV.DIR.ROOT}")
+    log.info(f"executing from: {os.getcwd()}")
 
 
 @main.group(name="train")
@@ -56,7 +57,46 @@ def grp_train():
     pass
 
 
-@grp_train.command(name="run")
-def train_run():
-    """Run a training."""
-    train.run()
+# --- KGC TRAINING
+
+
+@grp_train.command(name="kgc")
+@click.option(
+    "-c",
+    "--config",
+    type=str,
+    multiple=True,
+    required=True,
+    help="configuration file",
+)
+@click.option(
+    "--learning-rate",
+    type=float,
+    required=False,
+    help="optimizers' learning rate",
+)
+@click.option(
+    "--embedding-dim",
+    type=int,
+    required=False,
+    help="embedding dimensionality",
+)
+@click.option(
+    "--regularizer-weight",
+    type=float,
+    required=False,
+    help="L2-regularization",
+)
+@click.option(
+    "--negatives",
+    type=int,
+    help="negatives per positives (only sLCWA)",
+)
+@click.option(
+    "--loss",
+    type=str,
+    help="one of the PyKEEN loss functions",
+)
+def train_run_kgc(**kwargs):
+    """Train a KGC model using PyKEEN."""
+    train.kgc(**kwargs)

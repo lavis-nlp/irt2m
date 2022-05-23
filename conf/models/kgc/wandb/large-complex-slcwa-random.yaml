@@ -1,0 +1,45 @@
+# use the wandb agent to run the sweep
+# first sweep to determine parameter ranges prior to a grid search
+name: cde-large complex random slcwa - 1
+description: Random search for ComplEx on IRT2/CDE-Large
+project: irt2-kgc
+
+method: random
+metric:
+  name: validation.both.realistic.hits_at_10
+  goal: maximize
+
+parameters:
+  learning-rate:
+    distribution: uniform
+    min: 0.1
+    max: 1
+  embedding-dim:
+    distribution: q_log_uniform_values
+    min: 100
+    max: 700
+  regularizer-weight:
+    distribution: log_uniform_values
+    min: 0.001
+    max: 0.1
+  negatives:
+    distribution: int_uniform
+    min: 1
+    max: 100
+  loss:
+    distribution: categorical
+    values:
+      - NSSALoss
+      - CrossEntropyLoss
+      - BCEAfterSigmoidLoss
+      - BCEWithLogitsLoss
+
+program: irt2m
+command:
+  - ${program}
+  - train
+  - kgc
+  - "-c conf/models/kgc/base.yaml"
+  - "-c conf/models/kgc/models/complex-slcwa.yaml"
+  - "-c conf/models/kgc/data/cde-large.yaml"
+  - ${args}

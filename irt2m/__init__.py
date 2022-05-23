@@ -15,9 +15,14 @@ from ktz.filesystem import path as kpath
 
 _root_path = kpath(__file__).parent.parent
 
+# env vars
+ENV_DIR_DATA = "IRT2M_DATA"
+
+ENV_LOG_CONF = "IRT2M_LOG_CONF"
+ENV_LOG_FILE = "IRT2M_LOG_FILE"
+
 
 # check whether data directory is overwritten
-ENV_DIR_DATA = "IRT2M_DATA"
 if ENV_DIR_DATA in os.environ:
     _data_path = kpath(os.environ[ENV_DIR_DATA])
 else:
@@ -33,7 +38,7 @@ class _DIR:
 
 
 class ENV:
-    """IRT2 environment."""
+    """IRT2M environment."""
 
     DIR = _DIR
 
@@ -59,27 +64,29 @@ class TOKEN(Enum):
 
 
 log = logging.getLogger(__name__)
+
 # if used as library do not log anything
 log.addHandler(logging.NullHandler())
 
 
 def init_logging():
     """Read the logging configuration from conf/ and initialize."""
-    # remove the null handler
     global log
 
+    def _env(key, default):
+        if key in os.environ:
+            return os.environ[key]
+        return default
+
+    # expeting and removing the NullHandler
     assert len(log.handlers) == 1, "log misconfiguration"
     log.removeHandler(log.handlers[0])
 
-    with (ENV.DIR.CONF / "logging.yaml").open(mode="r") as fd:
+    conf_file = _env(ENV_LOG_CONF, ENV.DIR.CONF / "logging.yaml")
+    with kpath(conf_file, is_file=True).open(mode="r") as fd:
         conf = yaml.safe_load(fd)
-
-        # use data dir configuration to set logfile location
         logfile = conf["handlers"]["logfile"]
-        logfile["filename"] = (ENV.DIR.DATA / logfile["filename"]).resolve()
-
+        logfile["filename"] = _env(ENV_LOG_FILE, logfile["filename"].format(ENV=ENV))
         logging.config.dictConfig(conf)
 
-    # i have no idea how to apply the new configuration to the old logger :/
-    # so lets just delete the old logger and initialize a new one
     log.info("logging initialized")

@@ -1,0 +1,5 @@
+pipeline:
+  model: ComplEx
+  loss: CrossEntropyLoss
+  training_loop: lcwa
+
