@@ -1,7 +1,7 @@
 # use the wandb agent to run the sweep
 # first sweep to determine parameter ranges prior to a grid search
-name: cde-large complex random lcwa - 0
-description: Random search for ComplEx on IRT2/CDE-Large
+name: cde-small complex random lcwa - 0
+description: Random search for ComplEx on IRT2/CDE-Small
 project: irt2-kgc
 
 method: random
@@ -22,13 +22,6 @@ parameters:
     distribution: log_uniform_values
     min: 0.001
     max: 1
-  loss:
-    distribution: categorical
-    values:
-      - NSSALoss
-      - CrossEntropyLoss
-      - BCEAfterSigmoidLoss
-      - BCEWithLogitsLoss
 
 program: irt2m
 command:
@@ -37,5 +30,5 @@ command:
   - kgc
   - "-c conf/models/kgc/base.yaml"
   - "-c conf/models/kgc/models/complex-lcwa.yaml"
-  - "-c conf/models/kgc/data/cde-large.yaml"
+  - "-c conf/models/kgc/data/cde-small.yaml"
   - ${args}

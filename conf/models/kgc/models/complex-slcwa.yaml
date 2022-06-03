@@ -1,7 +1,9 @@
 pipeline:
   model: ComplEx
   loss: CrossEntropyLoss
+
   training_loop: slcwa
+
   negative_sampler: basic
   negative_sampler_kwargs:
     num_negs_per_pos: 5

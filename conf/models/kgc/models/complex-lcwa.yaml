@@ -1,5 +1,9 @@
 pipeline:
   model: ComplEx
   loss: CrossEntropyLoss
+
   training_loop: lcwa
+
+  training_kwargs:
+    batch_size: 64
 
