@@ -7,7 +7,6 @@ from irt2.dataset import IRT2
 import random
 import logging
 from pathlib import Path
-from functools import partial
 from dataclasses import dataclass
 
 import torch
@@ -67,26 +66,30 @@ class PyKEEN:
         random.shuffle(triples)
 
         hrt = torch.Tensor(triples).to(dtype=torch.long)[:, (0, 2, 1)]
-        threshold = int(hrt.shape[0] * (1 - ratio))
 
-        assert threshold < hrt.shape[0]
+        # cw_v = set(map(int, hrt[:, (0, 2)].ravel()))
+        # assert sum(cw_v) == (len(cw_v) + (len(cw_v) + 1)) // 2
 
-        cw_v = set(hrt[:, 0].tolist()) | set(hrt[:, 2].tolist())
-        e2id = {dataset.vertices[v]: v for v in cw_v}
-        r2id = {v: k for k, v in dataset.relations.items()}
+        # e2id = {dataset.vertices[v]: v for v in cw_v}
+        # r2id = {v: k for k, v in dataset.relations.items()}
 
-        log.info(f"retaining {len(e2id)} vertices for training")
+        # log.info(f"retaining {len(e2id)} vertices for training")
 
-        Factory = partial(
-            pk.triples.TriplesFactory,
-            entity_to_id=e2id,
-            relation_to_id=r2id,
-        )
+        # fac = pk.triples.TriplesFactory(
+        #     mapped_triples=hrt,
+        #     # entity_to_id=e2id,
+        #     # relation_to_id=r2id,
+        # )
 
-        self = Self(
-            training=Factory(mapped_triples=hrt[:threshold]),
-            validation=Factory(mapped_triples=hrt[threshold:]),
-        )
+        fac = pk.triples.TriplesFactory.create(mapped_triples=hrt)
+
+        # ratios: a float can be given between 0 and 1.0,
+        # non-inclusive. the first set of triples will get this ratio
+        # and the second will get the rest; random_state is of type
+        # pykeen.typing.torchrandomhint which may be an integer
+        training, validation = fac.split(ratios=1 - ratio, random_state=seed)
+
+        self = Self(training=training, validation=validation)
 
         log.info(
             f"created PyKEEN with training={self.training.num_triples} "
@@ -144,5 +147,6 @@ def load_tokenizer(
 
 
 # --- OPEN WORLD PROJECTOR TRAINING
+
 
 # --- OPEN WORLD JOINT TRAINING
