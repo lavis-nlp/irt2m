@@ -23,6 +23,17 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 
+def _add_loghandler(out: str):
+    # add an additional text logger
+    log.info(f"adding an additional log handler: {out}")
+
+    loghandler = logging.FileHandler(str(out), mode="w")
+
+    loghandler.setLevel(log.getEffectiveLevel())
+    loghandler.setFormatter(log.root.handlers[0].formatter)
+    logging.getLogger("irt2m").addHandler(loghandler)
+
+
 # -- CW KGC TRAINING
 
 
@@ -121,19 +132,20 @@ def kgc(
 ):
     """Train a KGC model."""
     assert config is not None
+    log.info("commence training of a closed-world KGC model")
 
     # as per our configuration wandb provides them as "-c foo"
     # which results in [" foo"] per config file entry
     config = map(str.strip, config)
 
-    log.info("commence training of a closed-world KGC model")
-    log.info(config)
-
     # configuration files and command line args
     conf = ryaml(*config)
-
     irt2 = IRT2.from_dir(path=conf["dataset"])
     conf = _kgc_handle_config(conf=conf, irt2=irt2, **overwrites)
+
+    logpath = kpath(conf["out"]) / "log.txt"
+    _add_loghandler(logpath)
+    log.info(f"writing additional logfile at {logpath}")
 
     pkds = PyKEEN.from_irt2(
         dataset=irt2,
