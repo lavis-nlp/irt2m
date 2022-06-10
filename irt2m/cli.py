@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """Universal entry point for the cli."""
 
-import irt2m
-from irt2m import train
-
-import os
 import logging
+import os
 import textwrap
 
 import click
 import pretty_errors
+
+import irt2m
+from irt2m import train
 
 irt2m.init_logging()
 
@@ -46,7 +46,15 @@ def _create_banner(variables: dict[str, str]):
 @click.group()
 def main():
     """Use irt2m from the command line."""
-    log.info(" · IRT2M CLI ·")
+    log.info(
+        """
+
+              ┌──────────────────────────────┐
+              │ IRT2M COMMAND LINE INTERFACE │
+              └──────────────────────────────┘
+        """
+    )
+
     log.info(f"initialized root path: {irt2m.ENV.DIR.ROOT}")
     log.info(f"executing from: {os.getcwd()}")
 
@@ -100,3 +108,20 @@ def grp_train():
 def train_run_kgc(**kwargs):
     """Train a KGC model using PyKEEN."""
     train.kgc(**kwargs)
+
+
+# --- PROJECTOR TRAINING
+
+
+@grp_train.command(name="projector")
+@click.option(
+    "-c",
+    "--config",
+    type=str,
+    multiple=True,
+    required=True,
+    help="configuration file",
+)
+def train_run_projector(**kwargs):
+    """Train a projector that maps text to KGC vertices."""
+    train.projector(**kwargs)

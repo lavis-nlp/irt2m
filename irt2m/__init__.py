@@ -3,15 +3,14 @@
 """IRT2M import-time things."""
 
 
-import os
 import logging
 import logging.config
+import os
 from enum import Enum
 from pathlib import Path
 
 import yaml
 from ktz.filesystem import path as kpath
-
 
 _root_path = kpath(__file__).parent.parent
 
@@ -20,6 +19,7 @@ ENV_DIR_DATA = "IRT2M_DATA"
 
 ENV_LOG_CONF = "IRT2M_LOG_CONF"
 ENV_LOG_FILE = "IRT2M_LOG_FILE"
+ENV_LOG_FILE_LIBS = "IRT2M_LOG_FILE_LIBS"
 
 
 # check whether data directory is overwritten
@@ -85,8 +85,20 @@ def init_logging():
     conf_file = _env(ENV_LOG_CONF, ENV.DIR.CONF / "logging.yaml")
     with kpath(conf_file, is_file=True).open(mode="r") as fd:
         conf = yaml.safe_load(fd)
+
         logfile = conf["handlers"]["logfile"]
-        logfile["filename"] = _env(ENV_LOG_FILE, logfile["filename"].format(ENV=ENV))
+        logfile["filename"] = _env(
+            ENV_LOG_FILE,
+            logfile["filename"].format(ENV=ENV),
+        )
+
+        logfile_libs = conf["handlers"]["logfile_libs"]
+        logfile_libs["filename"] = _env(
+            ENV_LOG_FILE_LIBS,
+            logfile["filename"].format(ENV=ENV),
+        )
+
         logging.config.dictConfig(conf)
+        logging.captureWarnings(True)
 
     log.info("logging initialized")

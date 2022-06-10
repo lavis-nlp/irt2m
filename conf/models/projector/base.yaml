@@ -1,0 +1,68 @@
+# Configuration for projector training
+
+# irt2m
+
+wandb:
+  project: irt2m-projector
+
+# tested: bert base models (see transformers lib)
+encoder: bert-base-cased
+
+# for available projector models see irt2m.models.PROJECTORS
+projector: single context affine
+
+# available format keys:
+#   dataset: the (normalised) upstream IRT2.name property (e.g. irt2-cde-l)
+#   date: start datetime formatted as %Y-%m-%d_%H-%M-%S
+#   encoder: as defined
+#   projector: as defined
+out: data/models/projector/{dataset}/{projector}.{date}
+
+
+# for available datasets see irt2m.data.PROJECTOR_DATASETS
+#   and their respective __init__ methods for *ds_kwargs
+module:
+  train_ds: ringbuffer
+  train_ds_kwargs:
+    seed: 5012022
+    contexts_per_sample: 30  # per batch
+    max_contexts_per_sample: 100
+  train_loader_kwargs:
+    subbatch_size: 5
+
+  # TODO change to validation ds/loader
+  valid_ds: ringbuffer
+  valid_ds_kwargs:
+    seed: 5012022
+    contexts_per_sample: 30  # per batch
+    # max_contexts_per_sample: 1000
+  valid_loader_kwargs:
+    subbatch_size: 5
+
+
+# pytorch
+
+# for available optimizers see irt2m.models.OPTIMIZERS
+optimizer: adam
+optimizer_kwargs:
+  lr: 1.0e-05
+
+# pytorch lightning
+
+checkpoint:
+  every_n_epochs: 1
+  mode: min
+  monitor: loss
+  save_last: true
+  save_top_k: 1
+
+# early_stopping:
+#   ...
+
+scheduler: constant
+scheduler_kwargs: {}
+trainer:
+  gpus: 1
+  max_steps: 1000
+  # this is the "debug" flag
+  fast_dev_run: true
