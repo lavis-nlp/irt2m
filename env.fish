@@ -17,13 +17,16 @@ conda activate irt2m
 
 echo "setting environment variables:"
 
-echo "  CUDA_VISIBLE_DEVICES"
 set -x CUDA_VISIBLE_DEVICES $N
+echo "  CUDA_VISIBLE_DEVICES $CUDA_VISIBLE_DEVICES"
 
-echo "  IRT2M_LOG_FILE"
 set -x IRT2M_LOG_FILE data/irt2m.$N.log
+echo "  IRT2M_LOG_FILE $IRT2M_LOG_FILE"
 
-echo "  PYTHONBREAKPOINT"
+set -x IRT2M_LOG_FILE_LIBS data/irt2m.$N.libs.log
+echo "  IRT2M_LOG_FILE_LIBS $IRT2M_LOG_FILE_LIBS"
+
 set -x PYTHONBREAKPOINT ipdb.set_trace
+echo "  PYTHONBREAKPOINT $PYTHONBREAKPOINT"
 
 echo

@@ -14,9 +14,13 @@ handlers:
     # provided: ENV (see irt2m/__init__.py)
     filename: "{ENV.DIR.DATA}/irt2m.log"
     formatter: standard
+  logfile_libs:
+    class: logging.FileHandler
+    filename: "{ENV.DIR.DATA}/irt2m.libs.log"
+    formatter: standard
   stdout:
     class: logging.StreamHandler
-    formatter: standard
+    formatter: plain
     stream: ext://sys.stdout
 
 loggers:
@@ -24,5 +28,21 @@ loggers:
     level: INFO
     handlers:
       - logfile
+
   pykeen:
     level: DEBUG
+    propagate: true
+    handlers:
+      - stdout
+
+  wandb:
+    level: ERROR
+    propagate: false
+    handlers:
+      - logfile_libs
+
+  pytorch_lightning:
+    level: WARNING
+    propagate: false
+    handlers:
+      - logfile_libs
