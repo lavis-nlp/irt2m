@@ -5,7 +5,7 @@ import logging
 import random
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import pykeen as pk
 import pykeen.pipeline
@@ -66,7 +66,10 @@ def _add_loghandler(out: str):
     logging.getLogger("irt2m").addHandler(loghandler)
 
 
-def _load_config_and_irt2(files: list[str]) -> tuple[IRT2, dict]:
+def _load_config_and_irt2(
+    files: list[str],
+    formatting: Callable[[dict], dict] = None,
+) -> tuple[IRT2, dict]:
     timestamp = datetime.now()
 
     # as per our configuration wandb provides them as "-c foo"
@@ -78,8 +81,7 @@ def _load_config_and_irt2(files: list[str]) -> tuple[IRT2, dict]:
     out = config["out"].format(
         dataset=irt2.config["create"]["name"].lower().replace("/", "-"),
         date=timestamp.strftime("%Y-%m-%d_%H-%M-%S"),
-        encoder=config["encoder"].lower(),
-        projector=config["projector"].lower(),
+        **(formatting(config) if formatting else {}),
     )
 
     config["out"] = str(kpath(out, exists=False))
@@ -123,7 +125,7 @@ def _kgc_handle_config(
                 "tags": [
                     "kgc",
                     conf["pipeline"]["model"].lower(),
-                    Path(conf["dataset"]).name.lower(),
+                    Path(conf["irt2"]).name.lower(),
                 ],
                 # "name": out.name,  - pykeen uses pipeline.title
                 "dir": str(out),
@@ -136,7 +138,7 @@ def _kgc_handle_config(
 
     # overwrite parameters
 
-    def _overwrite(conf, val, *keys):
+    def _overwrite(val, keys):
         if val is None:
             return
 
@@ -149,31 +151,20 @@ def _kgc_handle_config(
         target[keys[-1]] = val
 
     _overwrite(
-        conf,
         learning_rate,
-        "pipeline",
-        "optimizer_kwargs",
-        "lr",
+        ["pipeline", "optimizer_kwargs", "lr"],
     )
     _overwrite(
-        conf,
         embedding_dim,
-        "pipeline",
-        "model_kwargs",
-        "embedding_dim",
+        ["pipeline", "model_kwargs", "embedding_dim"],
     )
     _overwrite(
-        conf,
         regularizer_weight,
-        "pipeline",
-        "regularizer_kwargs",
-        "weight",
+        ["pipeline", "regularizer_kwargs", "weight"],
     )
     _overwrite(
-        conf,
         loss,
-        "pipeline",
-        "loss",
+        ["pipeline", "loss"],
     )
 
     # write config
@@ -194,7 +185,10 @@ def kgc(
     assert config is not None
     log.info("commence training of a closed-world KGC model")
 
-    irt2, conf = _load_config_and_irt2(config)
+    def formatting(config):
+        return dict(model=config["pipeline"]["model"])
+
+    irt2, conf = _load_config_and_irt2(config, formatting)
     conf = _kgc_handle_config(config=conf, irt2=irt2, **overwrites)
 
     logpath = kpath(conf["out"]) / "log.txt"
@@ -230,7 +224,6 @@ def _init_logger(config):
     logger = WandbLogger(
         project=config["wandb"]["project"],
         log_model=False,
-        name="TODO",
     )
 
     logger.experiment.config.update(config, allow_val_change=False)
@@ -239,7 +232,14 @@ def _init_logger(config):
 
 def projector(config: list[str]):
     """Train a projector."""
-    irt2, config = _load_config_and_irt2(config)
+
+    def formatting(config):
+        return dict(
+            encoder=config["encoder"].lower(),
+            projector=config["projector"].lower(),
+        )
+
+    irt2, config = _load_config_and_irt2(config, formatting)
     set_seed(config)
 
     logger = _init_logger(config)
@@ -291,3 +291,4 @@ def projector(config: list[str]):
 
     print_banner()
     trainer.fit(model, datamodule=datamodule)
+    breakpoint()
