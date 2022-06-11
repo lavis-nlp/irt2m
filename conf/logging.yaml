@@ -22,6 +22,8 @@ handlers:
     class: logging.StreamHandler
     formatter: plain
     stream: ext://sys.stdout
+  void:
+    class: logging.NullHandler
 
 loggers:
   root:
@@ -39,9 +41,15 @@ loggers:
     level: ERROR
     propagate: false
     handlers:
+      - void
+
+  py:
+    level: WARNING
+    propagate: false
+    handlers:
       - logfile_libs
 
-  pytorch_lightning:
+  lightning:
     level: WARNING
     propagate: false
     handlers:
