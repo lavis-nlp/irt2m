@@ -3,7 +3,7 @@
 # irt2m
 
 wandb:
-  project: irt2m-projector
+  project: irt2-projector
 
 # tested: bert base models (see transformers lib)
 encoder: bert-base-cased
@@ -26,7 +26,7 @@ module:
   train_ds_kwargs:
     seed: 5012022
     contexts_per_sample: 30  # per batch
-    max_contexts_per_sample: 100
+    max_contexts_per_sample: 10
   train_loader_kwargs:
     subbatch_size: 5
 

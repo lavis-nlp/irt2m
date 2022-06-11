@@ -31,6 +31,8 @@ import irt2m
 log = logging.getLogger(__name__)
 tqdm = partial(_tqdm, ncols=80)
 
+Config = dict
+
 
 # --- CLOSED WORLD KGC TRAINING
 
@@ -94,6 +96,11 @@ class PyKEEN:
         )
 
         return self
+
+    def to_path_binary(self, path: Path):
+        log.info(f"write datasets to {path}")
+        self.training.to_path_binary((path / "training").resolve())
+        self.validation.to_path_binary((path / "validation").resolve())
 
 
 # --- OPEN WORLD TRAINING
@@ -442,7 +449,7 @@ class RingDataset(td.Dataset):
         self,
         dataset: IRT2,
         tokenizer: tf.BertTokenizer,
-        config: dict,
+        config: Config,
         kind: Kind,
         contexts_per_sample: int,
         seed: int = None,
@@ -500,18 +507,15 @@ class RingDataset(td.Dataset):
         batch: list[ProjectorSample],
     ) -> tuple[torch.Tensor, list[ProjectorSample]]:
         """Batch samples."""
-        breakpoint()
-
-        gen = ((idxs, sample) for sample in batch for idxs in sample.indexes)
-        indexes, samples = zip(*(gen))
 
         # flatten and pad context sentences
+        gen = ((idxs, sample) for sample in batch for idxs in sample.indexes)
+        indexes, samples = zip(*(gen))
         padded = pad_sequence(
-            [torch.Tensor(indexes).to(torch.long)],
+            [torch.Tensor(idxs).to(torch.long) for idxs in indexes],
             batch_first=True,
         )
 
-        breakpoint()
         return padded, samples
 
     # ---
@@ -600,13 +604,13 @@ PROJECTOR_DATASETS = {
 class ProjectorModule(pl.LightningDataModule):
 
     irt2: IRT2
-    config: dict
+    config: Config
     tokenizer: tf.BertTokenizer
 
     def __init__(
         self,
         irt2: IRT2,
-        config: dict,
+        config: Config,
     ):
         super().__init__(self)
         self.irt2 = irt2
@@ -660,6 +664,10 @@ class ProjectorModule(pl.LightningDataModule):
 
     def test_dataloader(self):
         raise NotImplementedError()
+
+    def transfer_batch_to_device(self, collation, device, dataloader_idx):
+        batch, samples = collation
+        return batch.to(device=device), samples
 
 
 # --- OPEN WORLD JOINT TRAINING
