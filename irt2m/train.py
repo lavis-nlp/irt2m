@@ -18,6 +18,7 @@ from pytorch_lightning.loggers import WandbLogger
 
 from irt2m.data import ProjectorModule, PyKEEN
 from irt2m.models import PROJECTORS
+from irt2m.data import Config
 
 log = logging.getLogger(__name__)
 
@@ -68,8 +69,8 @@ def _add_loghandler(out: str):
 
 def _load_config_and_irt2(
     files: list[str],
-    formatting: Callable[[dict], dict] = None,
-) -> tuple[IRT2, dict]:
+    formatting: Callable[[Config], dict] = None,
+) -> tuple[IRT2, Config]:
     timestamp = datetime.now()
 
     # as per our configuration wandb provides them as "-c foo"
@@ -94,14 +95,14 @@ def _load_config_and_irt2(
 
 
 def _kgc_handle_config(
-    config: dict,
+    config: Config,
     irt2: IRT2,
     learning_rate: Optional[float] = None,
     embedding_dim: Optional[int] = None,
     regularizer_weight: Optional[float] = None,
     negatives: Optional[int] = None,
     loss: Optional[str] = None,
-) -> dict:
+) -> Config:
     out = kpath(config["out"])
 
     defaults = {
@@ -214,7 +215,8 @@ def kgc(
     )
 
     # pykeen calls .as_uri on the path -> .resolve() required
-    pk_results.save_to_directory((kpath(conf["out"]) / "pykeen").resolve())
+    pkds.to_path_binary(kpath(conf["out"]) / "triples")
+    pk_results.save_to_directory((kpath(conf["out"]) / "pipeline").resolve())
 
 
 # -- OW PROJECTOR TRAINING

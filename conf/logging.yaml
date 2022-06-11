@@ -32,10 +32,10 @@ loggers:
       - logfile
 
   pykeen:
-    level: DEBUG
-    propagate: true
+    level: INFO
+    propagate: false
     handlers:
-      - stdout
+      - logfile
 
   wandb:
     level: ERROR
