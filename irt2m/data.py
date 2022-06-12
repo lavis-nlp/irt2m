@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import ClassVar, Hashable, Literal, Optional
 
 import pykeen as pk
+import pykeen.datasets
 import pykeen.triples
 import pytorch_lightning as pl
 import torch
@@ -37,6 +38,7 @@ Config = dict
 # --- CLOSED WORLD KGC TRAINING
 
 
+# TODO use pykeen.datasets.EagerDataset
 @dataclass
 class PyKEEN:
     """Train KGC models with PyKEEN."""
@@ -104,6 +106,99 @@ class PyKEEN:
 
 
 # --- OPEN WORLD TRAINING
+
+
+def create_ow_pykeen_dataset(irt2) -> pykeen.datasets.Dataset:
+    # The KGC models are trained based on a TriplesFactory
+    # which only has mapped_triples provided (see data.PyKEEN.from_irt2).
+    # The way PyKEEN handles this case is quite simple:
+    #  - num_entities: maximum vid + 1
+    #  - num_relations: maximum rid + 1
+    #  - entity_ids: set(vids)
+    #  - relation_ids: set(rids)
+    #
+    # This means we can safely create a new TriplesFactory with
+    # all known triples as no internal id-mapping takes place.
+    # However, for open-world predictions, we change to MID's
+    # and need to create a mapping for that.
+
+    # (1) create mid -> index mapping
+
+    val_mids = set.union(*irt2.open_mentions_val.values())
+    test_mids = set.union(*irt2.open_mentions_test.values())
+
+    # test leakage
+    assert not val_mids & test_mids
+    mids = val_mids | test_mids
+
+    closed_vids = {v for h, t, r in irt2.closed_triples for v in (h, t)}
+    offset = max(closed_vids) + 1
+
+    mid2idx = {mid: i + offset for i, mid in enumerate(mids)}
+
+    # test partition
+    assert not set(closed_vids) & set(mid2idx.values())
+
+    # (2) map tasks to triples
+
+    closed_vids = {v for h, t, r in irt2.closed_triples for v in (h, t)}
+
+    def triples(col: dict):
+        # removing ow-ow triples
+        yield from (
+            (mid, rid, vid)
+            for (mid, rid), vids in col.items()
+            for vid in vids
+            if vid in closed_vids
+        )
+
+    def build_tripleset(head_task, tail_task):
+        heads = set((mid2idx[mid], rid, vid) for mid, rid, vid in triples(head_task))
+        tails = set((vid, rid, mid2idx[mid]) for mid, rid, vid in triples(tail_task))
+        return heads | tails
+
+    # htr -> hrt as pykeen requires
+    train_triples = {(h, r, t) for h, t, r in irt2.closed_triples}
+
+    valid_triples = build_tripleset(
+        head_task=irt2.open_kgc_val_heads,
+        tail_task=irt2.open_kgc_val_tails,
+    )
+
+    test_triples = build_tripleset(
+        head_task=irt2.open_kgc_test_heads,
+        tail_task=irt2.open_kgc_test_tails,
+    )
+
+    # (3) build pykeen datasets
+
+    kwargs = dict(
+        num_entities=max(mid2idx.values()),
+        num_relations=len(irt2.relations),
+    )
+
+    e2idx = {f"{irt2.vertices[vid]} ({vid=})": vid for vid in closed_vids}
+    e2idx |= {f"{irt2.mentions[mid]} ({mid=})": idx for mid, idx in mid2idx.items()}
+
+    r2idx = {name: rid for rid, name in irt2.relations.items()}
+
+    def factory(triples):
+        # create a CoreTriplesFactory
+        mapped = torch.Tensor(list(triples)).to(dtype=torch.long)
+        fac = pykeen.triples.TriplesFactory.create(mapped_triples=mapped, **kwargs)
+
+        # and add labels (this also checks consistency)!
+        labeled = fac.with_labels(entity_to_id=e2idx, relation_to_id=r2idx)
+
+        return labeled
+
+    dataset = pykeen.datasets.EagerDataset(
+        training=factory(train_triples),
+        validation=factory(valid_triples),
+        testing=factory(test_triples),
+    )
+
+    return mid2idx, dataset
 
 
 def load_tokenizer(
