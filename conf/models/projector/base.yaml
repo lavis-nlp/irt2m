@@ -2,9 +2,6 @@
 
 # irt2m
 
-wandb:
-  project: irt2-projector
-
 # tested: bert base models (see transformers lib)
 encoder: bert-base-cased
 
@@ -18,26 +15,35 @@ projector: single context affine
 #   projector: as defined
 out: data/models/projector/{dataset}/{projector}.{date}
 
+# which kgc evaluations to run while training
+evaluations:
+  - kgc/train         # closed world kgc with original embeddings (run once before training)
+  - kgc/transductive  # closed world kgc with projections (irt2.closed_triples)
+  - kgc/inductive     # open world kgc with projections (irt2.open_kgc_val*)
+  - kgc/test          # currently disabled
+
+
+# irt2m.data
 
 # for available datasets see irt2m.data.PROJECTOR_DATASETS
 #   and their respective __init__ methods for *ds_kwargs
 module:
-  train_ds: ringbuffer
+  train_ds: vertex ringbuffer
   train_ds_kwargs:
     seed: 5012022
-    contexts_per_sample: 30  # per batch
-    max_contexts_per_sample: 10
+    contexts_per_sample: 10  # per batch
+    max_contexts_per_sample: 100
   train_loader_kwargs:
-    subbatch_size: 5
+    batch_size: 1
+    subbatch_size: 10
 
-  # TODO change to validation ds/loader
-  valid_ds: ringbuffer
+  valid_ds: mention ringbuffer
   valid_ds_kwargs:
     seed: 5012022
     contexts_per_sample: 30  # per batch
-    # max_contexts_per_sample: 1000
+    max_contexts_per_sample: 1000
   valid_loader_kwargs:
-    subbatch_size: 5
+    batch_size: 1
 
 
 # pytorch
@@ -63,6 +69,10 @@ scheduler: constant
 scheduler_kwargs: {}
 trainer:
   gpus: 1
-  max_steps: 1000
+  # 12886 = 1 epoch
+  max_steps: 240_000
   # this is the "debug" flag
-  fast_dev_run: true
+  fast_dev_run: false
+
+wandb:
+  project: irt2-projector

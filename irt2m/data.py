@@ -29,8 +29,10 @@ from tqdm import tqdm as _tqdm
 
 import irt2m
 
+TERM_WIDTH = 120
+
 log = logging.getLogger(__name__)
-tqdm = partial(_tqdm, ncols=80)
+tqdm = partial(_tqdm, ncols=TERM_WIDTH)
 
 Config = dict
 
@@ -58,7 +60,7 @@ class PyKEEN:
     @classmethod
     def from_irt2(
         cls,
-        dataset: IRT2,
+        irt2: IRT2,
         ratio: float,
         seed: int,
     ):
@@ -78,7 +80,7 @@ class PyKEEN:
         log.info(f"create PyKEEN dataset with {seed=}")
 
         random.seed(seed)
-        triples = sorted(dataset.closed_triples)
+        triples = sorted(irt2.closed_triples)
         random.shuffle(triples)
 
         hrt = torch.Tensor(triples).to(dtype=torch.long)[:, (0, 2, 1)]
@@ -274,14 +276,14 @@ class TokenCache:
         def __enter__(self):
             self.fd_toks = gzip.open(str(self.cache.tokens), mode="rb")
 
-            log.info("read meta information from cache")
+            log.debug("read meta information from cache")
             with self.cache.meta.open(mode="rb") as fd:
                 self.meta = pickle.load(fd)
 
             return self
 
         def __exit__(self, *_):
-            log.info("closing cache reader")
+            log.debug("closing cache reader")
             self.fd_toks.close()
 
     class Writer:
@@ -335,20 +337,20 @@ class TokenCache:
 class ProjectorSample:
 
     key: Hashable
+    keyname: str  # describes the key for debugging
+
     indexes: tuple[Indexes]
 
     tokenizer: ClassVar[tf.BertTokenizer]
 
     def __str__(self) -> str:
-        return f"Sample key={self.key}: {len(self.indexes)} contexts"
+        return f"Sample {self.keyname}={self.key}: {len(self.indexes)} contexts"
 
     @property
     def description(self):
         """Represent a single sample as a string."""
         max_texts = 3
-        max_chars = 120
-
-        headline = f"Sample key={self.key}:"
+        headline = f"Sample {self.keyname}={self.key}:"
 
         rows = []
         for indexes, tokens in zip(self.indexes, self.tokens):
@@ -356,9 +358,9 @@ class ProjectorSample:
             rows.append(row)
 
         table = tabulate(rows[:max_texts])
-        table = "\n".join(line[:max_chars] for line in table.split("\n"))
+        table = "\n".join(line[:TERM_WIDTH] for line in table.split("\n"))
 
-        texts = "\n".join(text[:max_chars] for text in self.texts[:max_texts])
+        texts = "\n".join(text[:TERM_WIDTH] for text in self.texts[:max_texts])
         return "\n".join((headline, table, texts))
 
     @property
@@ -380,7 +382,7 @@ class RingDataset(td.Dataset):
     model_name: str
     contexts_per_sample: int
 
-    dataset: IRT2
+    irt2: IRT2
     tokenizer: tf.BertTokenizer
 
     rings: dict[Hashable, deque[Indexes]]
@@ -499,15 +501,17 @@ class RingDataset(td.Dataset):
         #     - save tokenized contexts to cache
         #     - if pruned: save pruned contexts to cache
 
+        hashargs = (
+            self.seed,
+            self.kind,
+            self.irt2.config,
+            self.keyname,
+        )
+
         threshold = self.max_contexts_per_sample
         if threshold:
             log.info(f"requiring pruned contexts (max: {threshold})")
-            hashv = args_hash(
-                self.seed,
-                self.kind,
-                self.dataset.config,
-                threshold,
-            )
+            hashv = args_hash(threshold, *hashargs)
 
             pruned_cache = TokenCache.create(hashv)
             if pruned_cache.exists:
@@ -515,11 +519,7 @@ class RingDataset(td.Dataset):
                 return self._init_from_cache(pruned_cache)
 
         log.info("requiring all contexts")
-        hashv = args_hash(
-            self.seed,
-            self.kind,
-            self.dataset.config,
-        )
+        hashv = args_hash(*hashargs)
 
         # either retrieve from cache
         cache = TokenCache.create(hashv)
@@ -542,7 +542,7 @@ class RingDataset(td.Dataset):
 
     def __init__(
         self,
-        dataset: IRT2,
+        irt2: IRT2,
         tokenizer: tf.BertTokenizer,
         config: Config,
         kind: Kind,
@@ -557,7 +557,7 @@ class RingDataset(td.Dataset):
 
         self.seed = seed
         self.kind = kind
-        self.dataset = dataset
+        self.irt2 = irt2
         self.contexts_per_sample = contexts_per_sample
         self.max_contexts_per_sample = max_contexts_per_sample
 
@@ -569,9 +569,9 @@ class RingDataset(td.Dataset):
         ProjectorSample.tokenizer = self.tokenizer
 
         Contexts = dict(
-            train=dataset.closed_contexts,
-            valid=dataset.open_contexts_val,
-            test=dataset.open_contexts_test,
+            train=irt2.closed_contexts,
+            valid=irt2.open_contexts_val,
+            test=irt2.open_contexts_test,
         )[kind]
 
         rings, stats = self._cached_init(Contexts)
@@ -582,20 +582,27 @@ class RingDataset(td.Dataset):
         self.keys = tuple(rings)
         self.stats = stats
 
-        log.info(f"loaded text for {len(rings)} vertices")
+        log.info(f"loaded text for {len(rings)} keys")
         log.info(" ".join(": ".join(map(str, tup)) for tup in stats.items()))
+
+    def __len__(self) -> int:
+        return len(self.rings)
 
     def __getitem__(self, i: int) -> ProjectorSample:
         """Retrieve a VID and N associated text contexts."""
-        vid = self.keys[i]
-        ring = self.rings[vid]
+        key = self.keys[i]
+        ring = self.rings[key]
 
         indexes = []
         while len(indexes) < self.contexts_per_sample:
             indexes.append(ring[0])
             ring.rotate()
 
-        return ProjectorSample(key=vid, indexes=tuple(indexes))
+        return ProjectorSample(
+            key=key,
+            keyname=self.keyname,
+            indexes=tuple(indexes),
+        )
 
     @staticmethod
     def collate_fn(
@@ -631,37 +638,7 @@ class RingDataset(td.Dataset):
 # --- OPEN WORLD PROJECTOR TRAINING
 
 
-class ProjectorTrainDataset(RingDataset):
-    """Projector training dataset."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        # sanity check
-
-        idx = 0
-        vid = self.keys[idx]
-
-        vid2mid = dict(
-            train=self.dataset.closed_mentions,
-            valid=self.dataset.open_mentions_val,
-            test=self.dataset.open_mentions_test,
-        )[self.kind]
-
-        max_mentions = 5
-        mentions = ", ".join(
-            f"{self.dataset.mentions[mid]} ({mid=})"
-            for mid in list(vid2mid[vid])[:max_mentions]
-        )
-
-        print(f"Sample {idx}: {self.dataset.vertices[vid]} ({vid=}):")
-        print(f"  Mentions ({max_mentions}/{len(vid2mid[vid])}: ")
-        print(f"  {mentions}")
-
-        print()
-        print(textwrap.indent(self[0].description, prefix="  "))
-        print()
-
+class ProjectorDataset(RingDataset):
     def encode(self, key, tokenized) -> bytes:
         """Encode key and tokens as a flat id list."""
         return encode_line((key,) + tokenized, sep=" ", fn=str)
@@ -670,29 +647,107 @@ class ProjectorTrainDataset(RingDataset):
         """Decode key, *tokens from single id line."""
         return decode_line(encoded, sep=" ", fn=int)
 
+
+class ProjectorVertexDataset(ProjectorDataset):
+    """
+    Projector training dataset.
+
+    Each sample is a vertex with associated text contexts
+    of all its mentions.
+    """
+
+    keyname = "vid"
+
+    def __init__(self, *args, **kwargs):
+        log.info("create >[vertex]< based ringbuffer dataset")
+        super().__init__(*args, **kwargs)
+
     def create_key(self, context) -> VID:
         """A sample is a closed-world vertex."""
-        return self.dataset.mid2vid[context.mid]
+        return self.irt2.mid2vid[context.mid]
+
+    @property
+    def description(self) -> str:
+        idx = random.randint(0, len(self))
+        vid = self.keys[idx]
+
+        vid2mid = dict(
+            train=self.irt2.closed_mentions,
+            valid=self.irt2.open_mentions_val,
+            test=self.irt2.open_mentions_test,
+        )[self.kind]
+
+        max_mentions = 5
+
+        mentions = ", ".join(
+            f"{self.irt2.mentions[mid]} ({mid=})"
+            for mid in list(vid2mid[vid])[:max_mentions]
+        )
+
+        header = textwrap.dedent(
+            f"""
+            PROJECTOR VERTEX DATASET
+
+            Sample {idx}: {self.irt2.vertices[vid]} ({vid=}):
+              Mentions ({max_mentions}/{len(vid2mid[vid])}:
+              {mentions}
+
+            """
+        )
+
+        return header + textwrap.indent(self[idx].description, prefix="  ")
 
 
-class ProjectorLoader(td.DataLoader):
+class ProjectorMentionDataset(ProjectorDataset):
+    """
+    Projector validation/testing dataset.
+
+    Each sample is a mention with associated text contexts.
+    """
+
+    keyname = "mid"
+
+    def __init__(self, *args, **kwargs):
+        log.info("create >[mention]< based ringbuffer dataset")
+        super().__init__(*args, **kwargs)
+
+    def create_key(self, context) -> VID:
+        """A sample is a closed-world vertex."""
+        return context.mid
+
+    @property
+    def description(self) -> str:
+        idx = random.randint(0, len(self))
+        mid = self.keys[idx]
+
+        header = textwrap.dedent(
+            f"""
+            PROJECTOR MENTION DATASET
+            Example Sample {idx}: {self.irt2.mentions[mid]} ({mid=}):
+            """
+        )
+
+        return header + textwrap.indent(self[idx].description, prefix="  ")
+
+
+class ProjectorTrainLoader(td.DataLoader):
 
     subbatch_size: int
 
     def __init__(
         self,
-        dataset,
         *args,
         subbatch_size: Optional[int] = None,
         **kwargs,
     ):
         assert subbatch_size
-        super().__init__(dataset, *args, **kwargs)
+        super().__init__(*args, **kwargs)
         self.subbatch_size = subbatch_size
 
 
 PROJECTOR_DATASETS = {
-    "ringbuffer": ProjectorTrainDataset,
+    "vertex ringbuffer": ProjectorVertexDataset,
+    "mention ringbuffer": ProjectorMentionDataset,
 }
 
 
@@ -723,35 +778,39 @@ class ProjectorModule(pl.LightningDataModule):
 
         TrainDataset = PROJECTOR_DATASETS[modconf["train_ds"]]
         self.train_ds = TrainDataset(
-            dataset=self.irt2,
+            irt2=self.irt2,
             tokenizer=self.tokenizer,
             config=self.config,
             kind="train",
             **modconf["train_ds_kwargs"],
         )
 
+        print(self.train_ds.description)
+
         ValidationDataset = PROJECTOR_DATASETS[modconf["valid_ds"]]
         self.valid_ds = ValidationDataset(
-            dataset=self.irt2,
+            irt2=self.irt2,
             tokenizer=self.tokenizer,
             config=self.config,
             kind="valid",
             **modconf["valid_ds_kwargs"],
         )
 
+        print(self.valid_ds.description)
+
         self.train_loader_kwargs = modconf["train_loader_kwargs"]
         self.valid_loader_kwargs = modconf["valid_loader_kwargs"]
 
     def train_dataloader(self):
-        return ProjectorLoader(
-            dataset=self.train_ds,
+        return ProjectorTrainLoader(
+            self.train_ds,
             collate_fn=self.train_ds.collate_fn,
             **self.train_loader_kwargs,
             # sampler=self.sampler,  # TODO
         )
 
     def val_dataloader(self):
-        return ProjectorLoader(
+        return td.DataLoader(
             self.valid_ds,
             collate_fn=self.valid_ds.collate_fn,
             **self.valid_loader_kwargs,

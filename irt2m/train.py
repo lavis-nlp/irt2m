@@ -16,9 +16,8 @@ from ktz.collections import dmerge, ryaml
 from ktz.filesystem import path as kpath
 from pytorch_lightning.loggers import WandbLogger
 
-from irt2m.data import ProjectorModule, PyKEEN
+from irt2m.data import Config, ProjectorModule, PyKEEN
 from irt2m.models import PROJECTORS
-from irt2m.data import Config
 
 log = logging.getLogger(__name__)
 
@@ -223,12 +222,21 @@ def kgc(
 
 
 def _init_logger(config):
-    logger = WandbLogger(
-        project=config["wandb"]["project"],
-        log_model=False,
-    )
+    if "wandb" in config:
+        logger = WandbLogger(
+            project=config["wandb"]["project"],
+            log_model=False,
+        )
 
-    logger.experiment.config.update(config, allow_val_change=False)
+    else:
+        log.warning("o wandb configuration found; falling back to csv")
+        logger = pl.loggers.csv_logs.CSVLogger(config.out / "csv", name=name)
+
+    # TODO: if resume is possible, allow_val_change if resuming
+    logger.experiment.config.update(
+        config,
+        allow_val_change=False,
+    )
     return logger
 
 
@@ -242,17 +250,18 @@ def projector(config: list[str]):
         )
 
     irt2, config = _load_config_and_irt2(config, formatting)
+    debug = config["trainer"]["fast_dev_run"]
+
     set_seed(config)
 
-    logger = _init_logger(config)
+    logger = None if debug else _init_logger(config)
     datamodule = ProjectorModule(irt2, config)
 
     Projector = PROJECTORS[config["projector"]]
-    model = Projector(config, datamodule.tokenizer)
+    model = Projector(irt2, config, datamodule.tokenizer)
 
     # configure
 
-    debug: bool = config["trainer"]["fast_dev_run"]
     out = kpath(config["out"], create=not debug)
 
     if debug:
@@ -263,10 +272,12 @@ def projector(config: list[str]):
         dirpath=out / "checkpoints",
     )
 
-    callbacks = [
-        pl.callbacks.ModelCheckpoint(**checkpoint_args),
-        pl.callbacks.LearningRateMonitor(logging_interval="step"),
-    ]
+    callbacks = []
+    if not debug:
+        callbacks = [
+            pl.callbacks.ModelCheckpoint(**checkpoint_args),
+            pl.callbacks.LearningRateMonitor(logging_interval="step"),
+        ]
 
     if "early_stopping" in config:
         log.info("add early stopping callback")
@@ -293,4 +304,6 @@ def projector(config: list[str]):
 
     print_banner()
     trainer.fit(model, datamodule=datamodule)
-    breakpoint()
+
+    # TODO write results to disk
+    # TODO try-except around fit to salvage data post-mortem
