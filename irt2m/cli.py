@@ -17,7 +17,9 @@ irt2m.init_logging()
 # ---
 
 log = logging.getLogger(__name__)
-os.environ["PYTHONBREAKPOINT"] = "ipdb.set_trace"
+
+os.environ["PYTHONBREAKPOINT"] = "pudb.set_trace"
+# os.environ["PYTHONBREAKPOINT"] = "ipdb.set_trace"
 
 
 pretty_errors.configure(
