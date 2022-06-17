@@ -49,8 +49,8 @@ loggers:
     handlers:
       - logfile_libs
 
-  lightning:
-    level: WARNING
+  pytorch_lightning:
+    level: INFO
     propagate: false
     handlers:
       - logfile_libs
