@@ -3,10 +3,12 @@
 
 import enum
 import logging
+import sys
 from contextlib import contextmanager
 from datetime import datetime
 from functools import cached_property
 from itertools import zip_longest
+from pathlib import Path
 
 import pykeen.datasets
 import pykeen.evaluation
@@ -103,6 +105,9 @@ class KGC:
     Maintains a trained PyKEEN model.
     """
 
+    name: str
+    path: Path
+
     config: data.Config
     mid2idx: dict[MID, int]
 
@@ -137,17 +142,18 @@ class KGC:
 
     def __init__(self, irt2: IRT2, config):
         self.config = config
-        path = kpath(config["kgc"], is_dir=True)
 
-        with kpath(path / "config.yaml", is_file=True).open(mode="r") as fd:
+        assert len(config["kgc"]) == 1
+        self.name, path = list(config["kgc"].items())[0]
+        self.path = kpath(path, is_dir=True)
+
+        log.info(f"loading >[{self.name}]< kgc model from {path}")
+
+        with kpath(self.path / "config.yaml", is_file=True).open(mode="r") as fd:
             self.config = yaml.safe_load(fd)
 
-        self.model = torch.load(
-            kpath(
-                path / "pipeline" / "trained_model.pkl",
-                is_file=True,
-            )
-        )
+        model = kpath(self.path / "pipeline" / "trained_model.pkl", is_file=True)
+        self.model = torch.load(model)
 
         self.mid2idx, self.dataset = data.create_ow_pykeen_dataset(irt2)
 
@@ -242,8 +248,6 @@ class Projector(Base):
         self._gathered_projections = False
 
     def gather_projections(self):
-        log.info("! gathering projections")
-
         count = int(self.projections_counts.sum().item())
         total = len(self.projections_counts)
 
@@ -389,7 +393,16 @@ class Projector(Base):
 
         self.kgc.model.to(device=self.device)
         with self.replace_embeddings(which):
-            results = evaluator.evaluate(model=self.kgc.model, **kwargs)
+            results = evaluator.evaluate(
+                model=self.kgc.model,
+                tqdm_kwargs=dict(
+                    ncols=data.TERM_WIDTH,
+                    file=sys.stdout,
+                ),
+                **kwargs,
+            )
+
+        print()
 
         self.kgc.model.cpu()
         return results
@@ -401,14 +414,34 @@ class Projector(Base):
             "hits@10": results.get_metric("both.realistic.hits_at_10"),
         }
 
-        self.logger.log_metrics(
-            {f"{which.value}/{key}": val for key, val in metrics.items()},
-            self.global_step,
-        )
+        # cannot use self.log because lightning gets all teary-eyed
+        # if you want to log on_step from on_epoch* callbacks etc.
+        # (self.logger may be None if fast_dev_run)
+
+        if self.logger is not None:
+            self.logger.log_metrics(
+                {f"{which.value}/{key}": val for key, val in metrics.items()},
+                self.global_step,
+            )
 
         realistic = results.to_dict()["both"]["realistic"]
         log.info(f"{which.value}: >[{realistic['hits_at_10'] * 100:2.3f}]< h@10")
-        # TODO unless debug: write out whole result to disk
+
+        if not self.debug:
+            current_step = self.current_step if hasattr(self, "current_step") else 0
+
+            fname = (
+                f"epoch={self.current_epoch}"
+                f"-step={current_step}"
+                f"_{which.value.split('/')[1]}"
+                ".yaml"
+            )
+
+            path = kpath(self.config["out"], is_dir=True)
+            path = kpath(path / "kgc", create=True)
+
+            with (path / fname).open(mode="w") as fd:
+                yaml.safe_dump(results.to_dict(), fd)
 
     # /projection management
 
@@ -489,8 +522,9 @@ class Projector(Base):
             targets = self.targets(idxs)
 
             loss = self.loss(projections, targets)
-
             losses.append(loss)
+
+            # TODO scale loss?
             # self.manual_backward(loss / len(subbatches))
             self.manual_backward(loss)
 
@@ -505,8 +539,8 @@ class Projector(Base):
         optimizer.zero_grad()
 
         loss = torch.stack(losses).mean()
-
         self.log("training/loss", loss)
+
         return loss
 
     def validation_step(
@@ -538,14 +572,10 @@ class Projector(Base):
 
     def on_train_epoch_start(self):
         log.info(f"starting training >[epoch {self.current_epoch}]<")
-
-        # continuously log the baseline for a nice transductive plot
-        train = Evaluation.kgc_train
-        if train in self.evaluations:
-            self._log_kgc_results(train, self._kgc_train_results)
+        self.log("trainer/global_epoch", self.current_epoch)
 
     def on_train_epoch_end(self):
-        log.info(f"training >[epoch {self.current_epoch}]< ended")
+        log.info(f"training epoch {self.current_epoch} ended")
 
     def on_validation_epoch_start(self, *_):
         log.info("validation epoch start")
@@ -555,6 +585,12 @@ class Projector(Base):
 
         self.gather_projections()
 
+        # continuously log the baseline for a nice transductive plot
+        train = Evaluation.kgc_train
+        if train in self.evaluations:
+            self._log_kgc_results(train, self._kgc_train_results)
+
+        # run evaluations with projections
         evaluations = {Evaluation.kgc_transductive, Evaluation.kgc_inductive}
         for which in evaluations & self.evaluations:
             results = self.run_kgc_evaluation(which)
@@ -600,6 +636,6 @@ class SingleAffineProjector(Projector):
         return self.projector(reduced)
 
 
-PROJECTORS = {
-    "single context affine": SingleAffineProjector,
+MODELS = {
+    "single context affine projector": SingleAffineProjector,
 }

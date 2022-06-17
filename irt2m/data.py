@@ -389,10 +389,6 @@ class RingDataset(td.Dataset):
     idxs: tuple[Hashable]  # for __getitem__
     stats: dict
 
-    def __len__(self):
-        """Get dataset size."""
-        return len(self.rings)
-
     def _tqdm(self, *args, **kwargs):
         print()
         yield from tqdm(*args, unit=" contexts", **kwargs)
@@ -585,7 +581,8 @@ class RingDataset(td.Dataset):
         log.info(f"loaded text for {len(rings)} keys")
         log.info(" ".join(": ".join(map(str, tup)) for tup in stats.items()))
 
-    def __len__(self) -> int:
+    def __len__(self):
+        """Get dataset size."""
         return len(self.rings)
 
     def __getitem__(self, i: int) -> ProjectorSample:

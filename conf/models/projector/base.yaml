@@ -6,21 +6,22 @@
 encoder: bert-base-cased
 
 # for available projector models see irt2m.models.PROJECTORS
-projector: single context affine
+model: single context affine projector
 
 # available format keys:
+#   prefix: short prefix based on the configuration (see train._build_prefix)
 #   dataset: the (normalised) upstream IRT2.name property (e.g. irt2-cde-l)
 #   date: start datetime formatted as %Y-%m-%d_%H-%M-%S
 #   encoder: as defined
 #   projector: as defined
-out: data/models/projector/{dataset}/{projector}.{date}
+out: data/models/{prefix}/{date}
 
 # which kgc evaluations to run while training
 evaluations:
   - kgc/train         # closed world kgc with original embeddings (run once before training)
   - kgc/transductive  # closed world kgc with projections (irt2.closed_triples)
   - kgc/inductive     # open world kgc with projections (irt2.open_kgc_val*)
-  - kgc/test          # currently disabled
+  # - kgc/test          # currently disabled
 
 
 # irt2m.data
@@ -32,7 +33,7 @@ module:
   train_ds_kwargs:
     seed: 5012022
     contexts_per_sample: 10  # per batch
-    max_contexts_per_sample: 100
+    max_contexts_per_sample: 1000
   train_loader_kwargs:
     batch_size: 1
     subbatch_size: 10
@@ -58,19 +59,27 @@ optimizer_kwargs:
 checkpoint:
   every_n_epochs: 1
   mode: min
-  monitor: loss
+  monitor: training/loss  # see models.Metric
   save_last: true
   save_top_k: 1
 
-# early_stopping:
-#   ...
+early_stopping_args:
+  mode: max
+  monitor: kgc/inductive/hits@10
 
 scheduler: constant
 scheduler_kwargs: {}
+
 trainer:
   gpus: 1
-  # 12886 = 1 epoch
-  max_steps: 240_000
+
+  # 12886 steps = 1 epoch for cde-l
+  # max_steps: 500_000
+  max_epochs: 10
+
+  # limit_train_batches: 100
+  # limit_val_batches: 100
+
   # this is the "debug" flag
   fast_dev_run: false
 
