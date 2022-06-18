@@ -20,7 +20,7 @@ import yaml
 from irt2.dataset import IRT2
 from irt2.types import MID
 from ktz.filesystem import path as kpath
-from torch import nn
+from torch import Tensor, nn
 
 import irt2m
 from irt2m import data
@@ -134,11 +134,11 @@ class KGC:
     @cached_property
     def closed_world_idxs(self) -> torch.LongTensor:
         cw = set(range(self.dataset.num_entities)) - set(self.idx2mid)
-        return torch.Tensor(sorted(cw)).to(dtype=torch.long)
+        return Tensor(sorted(cw)).to(dtype=torch.long)
 
     @cached_property
     def open_world_idxs(self) -> torch.LongTensor:
-        return torch.Tensor(sorted(self.idx2mid)).to(dtype=torch.long)
+        return Tensor(sorted(self.idx2mid)).to(dtype=torch.long)
 
     def __init__(self, irt2: IRT2, config):
         self.config = config
@@ -178,13 +178,12 @@ class Projector(Base):
     # see __init__
     kgc: KGC
     irt2: IRT2
-    config: data.Config
     evaluations: set[Evaluation]
 
     # see _init_projections
-    targets: torch.Tensor
-    projections: torch.Tensor
-    projections_counts: torch.Tensor
+    targets: Tensor
+    projections: Tensor
+    projections_counts: Tensor
 
     # We use manual optimization (gradient accumulation for multi-context models)
     # https://pytorch-lightning.readthedocs.io/en/1.5.10/common/optimizers.html
@@ -248,6 +247,11 @@ class Projector(Base):
         self._gathered_projections = False
 
     def gather_projections(self):
+        if self.global_step == 0:
+            log.info("skipping projection gathering (not trained yet)!")
+            self._gathered_projections = True
+            return
+
         count = int(self.projections_counts.sum().item())
         total = len(self.projections_counts)
 
@@ -265,7 +269,7 @@ class Projector(Base):
 
     def _update_projections(
         self,
-        projected: torch.Tensor,
+        projected: Tensor,
         indexes: list[int],
     ):
         assert len(indexes) == projected.shape[0]
@@ -395,10 +399,7 @@ class Projector(Base):
         with self.replace_embeddings(which):
             results = evaluator.evaluate(
                 model=self.kgc.model,
-                tqdm_kwargs=dict(
-                    ncols=data.TERM_WIDTH,
-                    file=sys.stdout,
-                ),
+                tqdm_kwargs=dict(ncols=data.TERM_WIDTH, file=sys.stdout),
                 **kwargs,
             )
 
@@ -450,11 +451,6 @@ class Projector(Base):
     def __init__(self, irt2: IRT2, config, *args, **kwargs):
         super().__init__(config, *args, **kwargs)
 
-        self.loss = torch.nn.MSELoss()
-
-        # self.embedding = torch.nn.Embedding(1, 1000)
-        # self.ff = torch.nn.Linear(1000, 1000)
-
         self.irt2 = irt2
         self.kgc = KGC(irt2, config)
         self.kgc.model.cpu()
@@ -478,7 +474,7 @@ class Projector(Base):
 
     def forward(
         self,
-        collation: tuple[torch.Tensor, list[data.ProjectorSample]],
+        collation: tuple[Tensor, list[data.ProjectorSample]],
     ):
         indexes, samples = collation
 
@@ -498,7 +494,7 @@ class Projector(Base):
 
     def training_step(
         self,
-        collation: tuple[torch.Tensor, list[data.ProjectorSample]],
+        collation: tuple[Tensor, list[data.ProjectorSample]],
         batch_idx,
     ):
         # sub-batching and gradient accumulation
@@ -521,7 +517,7 @@ class Projector(Base):
             idxs = torch.LongTensor(idxs).to(device=self.device)
             targets = self.targets(idxs)
 
-            loss = self.loss(projections, targets)
+            loss = self.compare(projections, targets)
             losses.append(loss)
 
             # TODO scale loss?
@@ -545,7 +541,7 @@ class Projector(Base):
 
     def validation_step(
         self,
-        collation: tuple[torch.Tensor, list[data.ProjectorSample]],
+        collation: tuple[Tensor, list[data.ProjectorSample]],
         batch_idx,
     ):
         projections, reduced_samples = self.forward(collation)
@@ -603,7 +599,7 @@ class Projector(Base):
     # interface
 
     # batch x tokens x text_dims -> batch x text_dims
-    def aggregate(self, encoded: torch.Tensor) -> torch.Tensor:
+    def aggregate(self, encoded: Tensor) -> Tensor:
         raise NotImplementedError()
 
     # batch x textdims -> [unique] keys x text_dims
@@ -611,10 +607,36 @@ class Projector(Base):
         raise NotImplementedError()
 
     # [unique] keys x kge dims
-    def project(self, reduced: torch.Tensor) -> torch.Tensor:
+    def project(self, reduced: Tensor) -> Tensor:
+        raise NotImplementedError()
+
+    def compare(self, projected: Tensor, target: Tensor) -> Tensor:
         raise NotImplementedError()
 
     # /interface
+
+    # debugging and introspection
+
+    def str_triple(self, triple: tuple[int]):
+        h, r, t = triple
+
+        def resolve(idx):
+            try:
+                mid = self.kgc.idx2mid[idx]
+                return f"{self.irt2.mentions[mid]} ({mid=})"
+            except KeyError:
+                return f"{self.irt2.vertices[idx]} ({idx=})"
+
+        # if it can be found in the KGC.idx2mid mapping
+        # it was a former MID and a VID otherwise
+
+        h = resolve(h)
+        t = resolve(t)
+        r = f"{self.irt2.relations[r]}"
+
+        return f"{h} -{r}- {t}"
+
+    # /debugging and introspection
 
 
 class SingleAffineProjector(Projector):
@@ -632,8 +654,11 @@ class SingleAffineProjector(Projector):
     def reduce(self, aggregated, samples):
         return aggregated, samples
 
-    def project(self, reduced: torch.Tensor):
+    def project(self, reduced: Tensor):
         return self.projector(reduced)
+
+    def compare(self, projected, target):
+        return torch.dist(projected, target, p=2) / projected.shape[0]
 
 
 MODELS = {
