@@ -1,0 +1,5 @@
+irt2: data/irt2/irt2-cde-tiny
+
+kgc:
+  # experiment 2022-06-03_19-00-45
+  complex: data/models/kgc/selected/complex-cde-t

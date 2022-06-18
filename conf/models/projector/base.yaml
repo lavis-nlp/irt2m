@@ -32,7 +32,7 @@ module:
   train_ds: vertex ringbuffer
   train_ds_kwargs:
     seed: 5012022
-    contexts_per_sample: 10  # per batch
+    contexts_per_sample: 30  # per batch
     max_contexts_per_sample: 1000
   train_loader_kwargs:
     batch_size: 1

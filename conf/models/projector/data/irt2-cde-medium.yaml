@@ -1,0 +1,5 @@
+irt2: data/irt2/irt2-cde-medium
+
+# experiment: 2022-06-03_23-23-52
+kgc:
+  complex: data/models/kgc/selected/complex-cde-m
