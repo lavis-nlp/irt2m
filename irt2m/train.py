@@ -60,7 +60,6 @@ def join_kwargs(defaults: dict, **kwargs):
 
 def _add_loghandler(out: str):
     # add an additional text logger
-    log.info(f"adding an additional log handler: {out}")
 
     loghandler = logging.FileHandler(str(out), mode="w")
     loghandler.setLevel(log.getEffectiveLevel())
@@ -224,11 +223,20 @@ def kgc(
 # -- SHARED PYTORCH LIGHTNING
 
 
-def fit(trainer, model, datamodule):
+def _fit(trainer, model, datamodule):
+    trainer.fit(model, datamodule=datamodule)
+
+
+def fit(trainer, model, datamodule, debug):
+
+    if debug:
+        _fit(trainer, model, datamodule)
+        return
+
     out = kpath(model.config["out"], is_dir=True)
 
     try:
-        trainer.fit(model, datamodule=datamodule)
+        _fit(trainer, model, datamodule)
 
     except Exception as exc:
         out_err = kpath(out / "death", create=True)
@@ -402,11 +410,13 @@ def projector(config: list[str]):
 
     irt2, config = _load_config_and_irt2(config, config_handler)
     debug = config["trainer"]["fast_dev_run"]
+    out = kpath(config["out"], create=not debug)
+
+    if not debug:
+        _add_loghandler(out / "log.txt")
+
     if debug:
         log.warning("running in debug mode")
-
-    out = kpath(config["out"], create=not debug)
-    _add_loghandler(out / "log.txt")
 
     set_seed(config)
 
@@ -440,4 +450,4 @@ def projector(config: list[str]):
     print_banner()
     log.info("✝ rise, if you would")
 
-    fit(trainer, model, datamodule)
+    fit(trainer, model, datamodule, debug)
