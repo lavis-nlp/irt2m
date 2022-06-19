@@ -1,3 +1,6 @@
+# given h, r, t \in C:
+# torch.real(tensor_product(h, r, torch.conj(t)).sum(dim=-1))
+
 pipeline:
   model: ComplEx
   loss: CrossEntropyLoss

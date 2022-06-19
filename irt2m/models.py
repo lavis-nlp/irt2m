@@ -9,6 +9,7 @@ from datetime import datetime
 from functools import cached_property
 from itertools import zip_longest
 from pathlib import Path
+from typing import Literal, Union
 
 import pykeen.datasets
 import pykeen.evaluation
@@ -18,7 +19,7 @@ import torch
 import transformers as tf
 import yaml
 from irt2.dataset import IRT2
-from irt2.types import MID
+from irt2.types import MID, VID
 from ktz.filesystem import path as kpath
 from torch import Tensor, nn
 
@@ -100,30 +101,90 @@ class Base(pl.LightningModule):
 # --- OPEN WORLD PROJECTOR TRAINING
 
 
+# index internally used to maintain
+# a global, gapless numbering of entitites
+# to be scored by the PyKEEN triple scorers
+IDX = int
+
+
 class KGC:
     """
     Maintains a trained PyKEEN model.
+
+    Some notes regarding Embeddings as maintained by PyKEEN:
+
+
+    Data Model
+    ----------
+
+    model = self.kgc.model
+
+    model.entity_representations:
+      torch.nn.modules.container.ModuleList
+
+    model.entity_representations[0]:
+      pykeen.nn.representation.Embedding
+
+    model.entity_representations[0]._embeddings:
+      torch.nn.modules.sparse.Embedding
+
+    model.entity_representations[0]._embeddings.weight:
+      torch.nn.parameter.Parameter
+
+
+    Data Types
+    ----------
+
+    Let's see for ComplEx where the complex numbers are:
+
+    idxs = torch.LongTensor([0])
+    f = torch.is_complex
+
+    f(model.entity_representations[0]._embeddings.weight)
+      False
+
+    f(self.kgc.model.entity_representations[0]._embeddings(idxs))
+      False
+
+    f(self.kgc.model.entity_representations[0](idxs))
+      True
+
+    This is because PyKEEN saves data as real-valued (n, 2*d) sized
+    real embeddings and in the forward method torch.view_as_complex
+    is called (torch.nn.Embedding has no complex number support yet).
+
+    See also:
+    https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L353
+    https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L410
+
+
+    Conclusion
+    ----------
+
+    We simply access the private _embeddings.weight
+    and leave the interpretation for PyKEEN when scoring.
+
     """
 
     name: str
     path: Path
 
     config: data.Config
-    mid2idx: dict[MID, int]
+    mid2idx: dict[MID, IDX]
 
     model: pykeen.models.ERModel
     dataset: pykeen.datasets.Dataset
 
     @cached_property
-    def idx2mid(self) -> dict[int, MID]:
+    def idx2mid(self) -> dict[IDX, MID]:
         return {v: k for k, v in self.mid2idx.items()}
 
     @property
-    def cw_entity_embedding(self) -> nn.Embedding:
+    def cw_entity_embedding(self) -> pykeen.nn.representation.Embedding:
         return self.model.entity_representations[0]
 
     @property
-    def relation_embedding(self) -> nn.Embedding:
+    def relation_embedding(self) -> pykeen.nn.representation.Embedding:
         return self.model.relation_representations[0]
 
     @cached_property
@@ -156,6 +217,32 @@ class KGC:
         self.model = torch.load(model)
 
         self.mid2idx, self.dataset = data.create_ow_pykeen_dataset(irt2)
+
+    # index mapping: convert between indexes and vid, mid
+
+    def idx2key(
+        self,
+        idx: IDX,
+    ) -> tuple[Literal["mid", "vid"], Union[VID, MID]]:
+        # if it can be found in the KGC.idx2mid mapping
+        # it was a former MID and a VID otherwise
+
+        try:
+            mid = self.kgc.idx2mid[idx]
+            return "mid", mid
+        except KeyError:
+            return "vid", idx
+
+    def key2idx(
+        self,
+        kind: Literal["mid", "vid"],
+        key: Union[VID, MID],
+    ) -> IDX:
+        assert kind in {"mid", "vid"}
+        if kind == "mid":
+            return self.mid2idx[key]
+        if kind == "vid":
+            return key
 
 
 class Evaluation(enum.Enum):
@@ -197,16 +284,13 @@ class Projector(Base):
 
     def _init_projections(self):
         # init reference embedding
+        self.targets = self.kgc.cw_entity_embedding._embeddings.weight.detach()
+        self.targets = self.targets.to(device=self.device)
 
-        n = self.kgc.cw_entity_embedding.num_embeddings
-        embedding = self.kgc.cw_entity_embedding(torch.arange(n))
+        # we require real embeddings for norm/euclidean operations
+        assert self.targets.dtype == torch.float32
 
-        if torch.is_complex(embedding):
-            embedding = torch.hstack((embedding.real, embedding.imag))
-
-        assert embedding.dtype == torch.float32
-
-        _, dim = embedding.shape
+        _, dim = self.targets.shape
         total = self.kgc.dataset.num_entities
 
         # registering buffers to assure that they are (1) not part
@@ -215,17 +299,13 @@ class Projector(Base):
         self.register_buffer("projections", torch.zeros((total, dim)))
         self.register_buffer("projections_counts", torch.zeros(total))
 
-        # when using a buffer to save reference embeddings, pytorch crashes
+        # note: when using a buffer to save reference embeddings, pytorch crashes
         # with "Trying to backward through the graph a second time (or directly
-        # access saved tensors after they have already been freed)"... idk
+        # access saved tensors after they have already been freed)"
         # self.register_buffer("targets", embedding)
-        self.targets = torch.nn.Embedding.from_pretrained(
-            embeddings=embedding,
-            freeze=True,
-        )
 
         log.info(f"registered projections buffer: {self.projections.shape}")
-        log.info(f"registered target buffer: {self.targets}")
+        log.info(f"registered target tensor: {self.targets.shape}")
 
     def clear_projections(self):
         """
@@ -284,57 +364,50 @@ class Projector(Base):
         self,
         which: Evaluation,
         new: pykeen.nn.Embedding,
-        old: pykeen.nn.Embedding,
     ):
 
         cw_idxs = self.kgc.closed_world_idxs
         ow_idxs = self.kgc.open_world_idxs
 
         # train uses the original embeddings
+        # (which also checks whether the targets tensor is correct)
         if which is Evaluation.kgc_train:
-            idxs, target = cw_idxs, old._embeddings.weight
+            idxs, projections = cw_idxs, self.targets
 
         if which is Evaluation.kgc_transductive:
-            idxs, target = cw_idxs, self.projections
+            idxs, projections = cw_idxs, self.projections
 
         if which is Evaluation.kgc_inductive:
-            idxs, target = ow_idxs, self.projections
+            idxs, projections = ow_idxs, self.projections
 
-        # TODO (currently disabled)
-        # if which is Evaluation.kgc_test:
+        # pykeen directly modifies the _embedding.weight.data
+        # https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L395
 
-        log.info(f"replacing {len(idxs)} embeddings")
-        new._embeddings.weight[idxs] = target[idxs]
+        log.info(f"replacing {len(idxs)} embeddings for {which.value}")
+        new._embeddings.weight[idxs] = projections[idxs]
 
     @contextmanager
     def replace_embeddings(self, which: Evaluation):
-
-        # Unfortunately, the official complex number support of pytorch
-        # was already integrated in PyKEEN which (albeit being correct
-        # from a swe perspective) complicates things:
-        # https://github.com/pykeen/pykeen/blob/fec9fe0f4b160b799ffe09d3acece9ad29367e1d/src/pykeen/nn/representation.py#L343
-
-        # Note: old._embeddings.weight.dtype always returns
-        # float even for complex embeddings.
-
         old = self.kgc.cw_entity_embedding
-        dtype = torch.cfloat if old.is_complex else torch.get_default_dtype()
-        dims = old.embedding_dim // 2 if old.is_complex else old.embedding_dim
 
+        # https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/models/unimodal/complex.py#L102
         new = self.kgc.cw_entity_embedding.__class__(
-            num_embeddings=self.kgc.dataset.num_entities,
-            embedding_dim=dims,
+            max_id=self.kgc.dataset.num_entities,
+            shape=old.shape,
+            # https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/models/unimodal/complex.py#L106
+            dtype=torch.cfloat if old.is_complex else torch.get_default_dtype(),
+            regularizer=old.regularizer,
             trainable=False,
-            dtype=dtype,
-        ).to(device=self.device)
+        )
 
-        new._embeddings.weight.zero_()
-        self._overwrite_embedding(which, new, old)
+        new = new.to(device=self.device)
+
+        # always provide the closed-world embeddings
+        self._overwrite_embedding(Evaluation.kgc_train, new)
+        if which is not Evaluation.kgc_train:
+            self._overwrite_embedding(which, new)
+
         self.kgc.model.entity_representations[0] = new
-
-        # it must be registered as parameter in self.kgc.model somewhere
-        # because PyKEENs utils.get_preferred_device gets angry and confused
-        # old = old.cpu()
 
         try:
             yield
@@ -403,8 +476,6 @@ class Projector(Base):
                 **kwargs,
             )
 
-        print()
-
         self.kgc.model.cpu()
         return results
 
@@ -456,7 +527,7 @@ class Projector(Base):
         self.kgc.model.cpu()
 
         self.evaluations = {Evaluation(name) for name in config["evaluations"]}
-        log.info("Will run evaluations: {{p.value for p in self.evaluations}}")
+        log.info(f"will run evaluations: {[p.value for p in self.evaluations]}")
 
         self._init_projections()
 
@@ -513,9 +584,9 @@ class Projector(Base):
             subcollation = batch[j:k], samples[j:k]
             projections, reduced_samples = self.forward(subcollation)
 
-            idxs = [s.key for s in reduced_samples]
+            idxs = [self.kgc.key2idx(s.keyname, s.key) for s in reduced_samples]
             idxs = torch.LongTensor(idxs).to(device=self.device)
-            targets = self.targets(idxs)
+            targets = self.targets[idxs]
 
             loss = self.compare(projections, targets)
             losses.append(loss)
@@ -545,16 +616,16 @@ class Projector(Base):
         batch_idx,
     ):
         projections, reduced_samples = self.forward(collation)
+        idxs = [self.kgc.key2idx(s.keyname, s.key) for s in reduced_samples]
 
         # while validating, the projections are associated with the
         # respective mention id: remapping to kgc index required
-        self._update_projections(
-            projections,
-            [self.kgc.mid2idx[s.key] for s in reduced_samples],
-        )
+        self._update_projections(projections, idxs)
 
     def on_fit_start(self):
         log.info("starting to fit")
+
+        self.targets = self.targets.to(device=self.device)
 
         train = Evaluation.kgc_train
         if train in self.evaluations:
@@ -620,18 +691,14 @@ class Projector(Base):
     def str_triple(self, triple: tuple[int]):
         h, r, t = triple
 
-        def resolve(idx):
-            try:
-                mid = self.kgc.idx2mid[idx]
-                return f"{self.irt2.mentions[mid]} ({mid=})"
-            except KeyError:
-                return f"{self.irt2.vertices[idx]} ({idx=})"
+        def format(key):
+            kind, idx = self.kgc.idx(key)
+            assert kind in {"mid", "vid"}
+            name = self.irt2.mentions[idx] if kind == "mid" else self.irt2.vertices[idx]
+            return f"{name} ({kind}={key}, {idx=})"
 
-        # if it can be found in the KGC.idx2mid mapping
-        # it was a former MID and a VID otherwise
-
-        h = resolve(h)
-        t = resolve(t)
+        h = format(h)
+        t = format(t)
         r = f"{self.irt2.relations[r]}"
 
         return f"{h} -{r}- {t}"

@@ -337,7 +337,7 @@ class TokenCache:
 class ProjectorSample:
 
     key: Hashable
-    keyname: str  # describes the key for debugging
+    keyname: str
 
     indexes: tuple[Indexes]
 
