@@ -321,7 +321,7 @@ class ProgressCallback(tqdm_progress.TQDMProgressBar):
     # to the different super().init_validation_tqdm() calls
 
     shared_kwargs = dict(
-        leave=True,
+        leave=False,
         ncols=data.TERM_WIDTH,
         file=sys.stdout,
     )

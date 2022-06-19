@@ -280,6 +280,7 @@ class Projector(Base):
     def debug(self) -> bool:
         return self.config["trainer"]["fast_dev_run"]
 
+    # ----------------------------------------
     # projection management
 
     def _init_projections(self):
@@ -422,8 +423,8 @@ class Projector(Base):
     # /kgc embedding shenanigans
 
     def run_kgc_evaluation(self, which: Evaluation) -> dict:
-        print(f"\n\n\nevaluate {which.value} {datetime.now()}\n")
-        log.info(f"running >[{which.value}]< evaluation")
+        # print(f"\n\n\nevaluate {which.value} {datetime.now()}\n")
+        # log.info(f"running >[{which.value}]< evaluation")
 
         evaluator = pykeen.evaluation.RankBasedEvaluator(filtered=True)
         dataset = self.kgc.dataset
@@ -468,15 +469,19 @@ class Projector(Base):
             log.info("debug mode: reducing mapped triples for scoring")
             kwargs["mapped_triples"] = kwargs["mapped_triples"][:100]
 
-        self.kgc.model.to(device=self.device)
+        self.kgc.model = self.kgc.model.to(device=self.device)
         with self.replace_embeddings(which):
             results = evaluator.evaluate(
                 model=self.kgc.model,
-                tqdm_kwargs=dict(ncols=data.TERM_WIDTH, file=sys.stdout),
+                tqdm_kwargs=dict(
+                    leave=False,
+                    ncols=data.TERM_WIDTH,
+                    file=sys.stdout,
+                ),
                 **kwargs,
             )
 
-        self.kgc.model.cpu()
+        self.kgc.model = self.kgc.model.cpu()
         return results
 
     def _log_kgc_results(self, which: Evaluation, results):
@@ -516,7 +521,7 @@ class Projector(Base):
                 yaml.safe_dump(results.to_dict(), fd)
 
     # /projection management
-
+    # ----------------------------------------
     # properties and initialization
 
     def __init__(self, irt2: IRT2, config, *args, **kwargs):
@@ -540,7 +545,7 @@ class Projector(Base):
         return self.config["module"]["train_loader_kwargs"]["subbatch_size"]
 
     # /properties and initialization
-
+    # ----------------------------------------
     # lightning callbacks
 
     def forward(
@@ -623,6 +628,7 @@ class Projector(Base):
         self._update_projections(projections, idxs)
 
     def on_fit_start(self):
+        print("\nFITTING\n")
         log.info("starting to fit")
 
         self.targets = self.targets.to(device=self.device)
@@ -663,10 +669,8 @@ class Projector(Base):
             results = self.run_kgc_evaluation(which)
             self._log_kgc_results(which, results)
 
-    # ---
-
     # /lightning callbacks
-
+    # ----------------------------------------
     # interface
 
     # batch x tokens x text_dims -> batch x text_dims
@@ -685,7 +689,7 @@ class Projector(Base):
         raise NotImplementedError()
 
     # /interface
-
+    # ----------------------------------------
     # debugging and introspection
 
     def str_triple(self, triple: tuple[int]):
