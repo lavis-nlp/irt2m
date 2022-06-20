@@ -5,7 +5,6 @@ import enum
 import logging
 import sys
 from contextlib import contextmanager
-from datetime import datetime
 from functools import cached_property
 from itertools import zip_longest
 from pathlib import Path
@@ -21,7 +20,7 @@ import yaml
 from irt2.dataset import IRT2
 from irt2.types import MID, VID
 from ktz.filesystem import path as kpath
-from torch import Tensor, nn
+from torch import Tensor
 
 import irt2m
 from irt2m import data
@@ -179,6 +178,10 @@ class KGC:
     def idx2mid(self) -> dict[IDX, MID]:
         return {v: k for k, v in self.mid2idx.items()}
 
+    @cached_property
+    def idx2str(self) -> dict[IDX, str]:
+        return {v: k for k, v in self.dataset.entity_to_id.items()}
+
     @property
     def cw_entity_embedding(self) -> pykeen.nn.representation.Embedding:
         return self.model.entity_representations[0]
@@ -188,18 +191,29 @@ class KGC:
         return self.model.relation_representations[0]
 
     @cached_property
+    def num_embeddings(self):
+        return max(self.dataset.entity_to_id.values()) + 1
+
+    @cached_property
     def embedding_dim(self) -> int:
         # this returns 1000 for 500 dimensional complex embeddings
         return self.cw_entity_embedding.embedding_dim
 
     @cached_property
     def closed_world_idxs(self) -> torch.LongTensor:
-        cw = set(range(self.dataset.num_entities)) - set(self.idx2mid)
-        return Tensor(sorted(cw)).to(dtype=torch.long)
+        # simply use the available vids
+        # information of dataset.training.entity_ids etc is not usable
+        # because all share the whole entity set
+
+        ht = self.dataset.training.mapped_triples[:, (0, 2)]
+        cw = sorted(set(ht.ravel().tolist()))
+
+        return torch.LongTensor(sorted(cw))
 
     @cached_property
     def open_world_idxs(self) -> torch.LongTensor:
-        return Tensor(sorted(self.idx2mid)).to(dtype=torch.long)
+        ow = sorted(self.idx2mid)
+        return torch.LongTensor(ow)
 
     def __init__(self, irt2: IRT2, config):
         self.config = config
@@ -292,7 +306,8 @@ class Projector(Base):
         assert self.targets.dtype == torch.float32
 
         _, dim = self.targets.shape
-        total = self.kgc.dataset.num_entities
+        total = self.kgc.num_embeddings
+        # total = self.kgc.dataset.num_entities
 
         # registering buffers to assure that they are (1) not part
         # of any gradient computation and (2) always on the correct device
@@ -393,7 +408,7 @@ class Projector(Base):
 
         # https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/models/unimodal/complex.py#L102
         new = self.kgc.cw_entity_embedding.__class__(
-            max_id=self.kgc.dataset.num_entities,
+            max_id=self.kgc.num_embeddings,
             shape=old.shape,
             # https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/models/unimodal/complex.py#L106
             dtype=torch.cfloat if old.is_complex else torch.get_default_dtype(),

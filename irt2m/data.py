@@ -174,10 +174,12 @@ def create_ow_pykeen_dataset(irt2) -> pykeen.datasets.Dataset:
 
     # (3) build pykeen datasets
 
-    kwargs = dict(
-        num_entities=max(mid2idx.values()),
-        num_relations=len(irt2.relations),
-    )
+    # NOTE: TriplesFactory.with_labels *silently* discards
+    # this information!!!
+    # kwargs = dict(
+    #     num_entities=max(mid2idx.values()),
+    #     num_relations=len(irt2.relations),
+    # )
 
     e2idx = {f"{irt2.vertices[vid]} ({vid=})": vid for vid in closed_vids}
     e2idx |= {f"{irt2.mentions[mid]} ({mid=})": idx for mid, idx in mid2idx.items()}
@@ -186,8 +188,8 @@ def create_ow_pykeen_dataset(irt2) -> pykeen.datasets.Dataset:
 
     def factory(triples):
         # create a CoreTriplesFactory
-        mapped = torch.Tensor(list(triples)).to(dtype=torch.long)
-        fac = pykeen.triples.TriplesFactory.create(mapped_triples=mapped, **kwargs)
+        mapped = torch.LongTensor(list(triples))
+        fac = pykeen.triples.TriplesFactory.create(mapped_triples=mapped)
 
         # and add labels (this also checks consistency)!
         labeled = fac.with_labels(entity_to_id=e2idx, relation_to_id=r2idx)
