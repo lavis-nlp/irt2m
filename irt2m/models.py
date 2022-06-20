@@ -152,9 +152,18 @@ class KGC:
     real embeddings and in the forward method torch.view_as_complex
     is called (torch.nn.Embedding has no complex number support yet).
 
+    Side note:
+      - view_as_complex: N x D x 2 -> N x D
+      - view_as_real:    N x D -> N x D x 2
+      - PyKEEN seems to encode it as N x 2D where the data is saved
+        with stride; for a complex vector [c_1, c_2, ...] c_1 = r_1 + i * i_1
+        the view_as_real view would be [[r_1, r_2, ...], [i_1, i_2, ...]]
+        and PyKEEN saves it as [r_1, c_1, r_2, c_2, ...]
+
+
     See also:
-    https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L353
-    https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L410
+     - https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L353
+     - https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L410
 
 
     Conclusion
@@ -162,7 +171,6 @@ class KGC:
 
     We simply access the private _embeddings.weight
     and leave the interpretation for PyKEEN when scoring.
-
     """
 
     name: str
@@ -363,7 +371,7 @@ class Projector(Base):
         # TODO assert this reflect context counts of datasets
         self._gathered_projections = True
 
-    def _update_projections(
+    def update_projections(
         self,
         projected: Tensor,
         indexes: list[int],
@@ -520,11 +528,10 @@ class Projector(Base):
         log.info(f"{which.value}: >[{realistic['hits_at_10'] * 100:2.3f}]< h@10")
 
         if not self.debug:
-            current_step = self.current_step if hasattr(self, "current_step") else 0
 
             fname = (
                 f"epoch={self.current_epoch}"
-                f"-step={current_step}"
+                f"-step={self.global_step}"
                 f"_{which.value.split('/')[1]}"
                 ".yaml"
             )
@@ -533,7 +540,7 @@ class Projector(Base):
             path = kpath(path / "kgc", create=True)
 
             with (path / fname).open(mode="w") as fd:
-                yaml.safe_dump(results.to_dict(), fd)
+                fd.write(yaml.safe_dump(results.to_dict()))
 
     # /projection management
     # ----------------------------------------
@@ -617,7 +624,7 @@ class Projector(Base):
 
             # while training, the projections are associated
             # with the respective vertex id: no remapping required
-            self._update_projections(
+            self.update_projections(
                 projections,
                 [s.key for s in reduced_samples],
             )
@@ -640,7 +647,7 @@ class Projector(Base):
 
         # while validating, the projections are associated with the
         # respective mention id: remapping to kgc index required
-        self._update_projections(projections, idxs)
+        self.update_projections(projections, idxs)
 
     def on_fit_start(self):
         print("\nFITTING\n")
@@ -683,6 +690,8 @@ class Projector(Base):
         for which in evaluations & self.evaluations:
             results = self.run_kgc_evaluation(which)
             self._log_kgc_results(which, results)
+
+        self.clear_projections()
 
     # /lightning callbacks
     # ----------------------------------------
