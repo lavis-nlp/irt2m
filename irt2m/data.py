@@ -544,8 +544,8 @@ class RingDataset(td.Dataset):
         tokenizer: tf.BertTokenizer,
         config: Config,
         kind: Kind,
-        contexts_per_sample: int,
         seed: int = None,
+        contexts_per_sample: int = None,
         max_contexts_per_sample: Optional[int] = None,
     ):
         assert seed is not None, "fixed seed is required"
@@ -699,8 +699,6 @@ class ProjectorVertexDataset(ProjectorDataset):
 
 class ProjectorMentionDataset(ProjectorDataset):
     """
-    Projector validation/testing dataset.
-
     Each sample is a mention with associated text contexts.
     """
 
@@ -729,6 +727,50 @@ class ProjectorMentionDataset(ProjectorDataset):
         return header + textwrap.indent(self[idx].description, prefix="  ")
 
 
+class ProjectorMentionFlatDataset(ProjectorMentionDataset):
+    """
+    Iterates all texts in an epoch: used for validation/test.
+    """
+
+    def __len__(self):
+        return len(self._flat)
+
+    def __getitem__(self, i: int):
+        return self._flat[i]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        log.info(">[flattening rings]< for validation/test")
+        self._flat = []
+
+        for key, ring in self.rings.items():
+            for indexes in ring:
+                self._flat.append(
+                    ProjectorSample(
+                        key=key,
+                        keyname=self.keyname,
+                        indexes=(tuple(indexes), ),
+                    )
+                )
+
+    @property
+    def description(self) -> str:
+        idx = random.randint(0, len(self))
+        sample = self[idx]
+        mid = sample.key
+
+        header = textwrap.dedent(
+            f"""
+            PROJECTOR MENTION DATASET
+            Example Sample {idx}: {self.irt2.mentions[mid]} ({mid=}):
+            """
+        )
+
+        return header + textwrap.indent(self[idx].description, prefix="  ")
+
+
+
 class ProjectorTrainLoader(td.DataLoader):
 
     subbatch_size: int
@@ -736,17 +778,19 @@ class ProjectorTrainLoader(td.DataLoader):
     def __init__(
         self,
         *args,
+        batch_size: int = None,
         subbatch_size: Optional[int] = None,
         **kwargs,
     ):
-        assert subbatch_size
-        super().__init__(*args, **kwargs)
-        self.subbatch_size = subbatch_size
+        assert batch_size
+        super().__init__(*args, batch_size=batch_size, **kwargs)
+        self.subbatch_size = subbatch_size or batch_size
 
 
 PROJECTOR_DATASETS = {
     "vertex ringbuffer": ProjectorVertexDataset,
     "mention ringbuffer": ProjectorMentionDataset,
+    "mention flat": ProjectorMentionFlatDataset,
 }
 
 

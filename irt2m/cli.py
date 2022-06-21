@@ -3,13 +3,12 @@
 
 import logging
 import os
-import textwrap
 
 import click
 import pretty_errors
 
 import irt2m
-from irt2m import train
+from irt2m import eval, train
 
 irt2m.init_logging()
 
@@ -29,34 +28,10 @@ pretty_errors.configure(
 )
 
 
-def _create_banner(variables: dict[str, str]):
-    variables = "\n".join(f"-  {k}: {v}" for k, v in variables.items())
-
-    s = """
-    --------------------
-     IRT2M CLIENT
-    --------------------
-
-    variables in scope:
-    {variables}
-    """
-
-    formatted = textwrap.dedent(s).format(variables=variables)
-    return textwrap.indent(formatted, "  ")
-
-
 @click.group()
 def main():
     """Use irt2m from the command line."""
-    log.info(
-        """
-
-              ┌──────────────────────────────┐
-              │ IRT2M COMMAND LINE INTERFACE │
-              └──────────────────────────────┘
-        """
-    )
-
+    log.info(f"\n\n{irt2m.banner}\n")
     log.info(f"initialized root path: {irt2m.ENV.DIR.ROOT}")
     log.info(f"executing from: {os.getcwd()}")
 
@@ -107,7 +82,7 @@ def grp_train():
     type=str,
     help="one of the PyKEEN loss functions",
 )
-def train_run_kgc(**kwargs):
+def train_kgc(**kwargs):
     """Train a KGC model using PyKEEN."""
     train.kgc(**kwargs)
 
@@ -124,6 +99,34 @@ def train_run_kgc(**kwargs):
     required=True,
     help="configuration file",
 )
-def train_run_projector(**kwargs):
+def train_projector(**kwargs):
     """Train a projector that maps text to KGC vertices."""
     train.projector(**kwargs)
+
+
+# --- EVALUATION
+
+
+@main.group(name="evaluate")
+def grp_evaluate():
+    """Evaluating models."""
+    pass
+
+
+@grp_evaluate.command(name="projector")
+@click.option(
+    "--data",
+    type=str,
+    required=True,
+    # multiple=True  # TODO run for all
+    help="directory defined in config['out']",
+)
+@click.option(
+    "--checkpoint",
+    type=str,
+    required=False,
+    help="checkpoint name (e.g. last.ckpt); otherwise load best",
+)
+def evaluate_projector(**kwargs):
+    """Evaluate a projector model"""
+    eval.projector(**kwargs)

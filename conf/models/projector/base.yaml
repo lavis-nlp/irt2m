@@ -28,23 +28,27 @@ evaluations:
 
 # for available datasets see irt2m.data.PROJECTOR_DATASETS
 #   and their respective __init__ methods for *ds_kwargs
+#
+# contexts_per_sample is the amount of text contexts
+#
 module:
   train_ds: vertex ringbuffer
   train_ds_kwargs:
     seed: 5012022
-    contexts_per_sample: 30  # per batch
+    contexts_per_sample: 10  # per batch
     max_contexts_per_sample: 1000
   train_loader_kwargs:
+    shuffle: true
     batch_size: 1
-    subbatch_size: 10
+    # subbatch_size: 10  is batch_size if None
 
-  valid_ds: mention ringbuffer
+  valid_ds: mention flat
   valid_ds_kwargs:
     seed: 5012022
-    contexts_per_sample: 30  # per batch
     max_contexts_per_sample: 1000
   valid_loader_kwargs:
-    batch_size: 1
+    shuffle: false
+    batch_size: 30
 
 
 # pytorch
@@ -75,7 +79,7 @@ trainer:
 
   # 12886 steps = 1 epoch for cde-l
   # max_steps: 500_000
-  max_epochs: 10
+  max_epochs: 100
 
   # limit_train_batches: 100
   # limit_val_batches: 100

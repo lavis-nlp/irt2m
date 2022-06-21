@@ -19,6 +19,7 @@ from ktz.filesystem import path as kpath
 from pytorch_lightning.callbacks.progress import tqdm_progress
 from pytorch_lightning.loggers import WandbLogger
 
+import irt2m
 from irt2m import data
 from irt2m.models import MODELS
 
@@ -26,16 +27,6 @@ log = logging.getLogger(__name__)
 
 
 # --
-
-
-def print_banner():
-    print(
-        """
-              ┌──────────────────────────┐
-              │ IRT2M PROJECTOR TRAINING │
-              └──────────────────────────┘
-        """
-    )
 
 
 def set_seed(config, seed: Optional[int] = None):
@@ -444,10 +435,10 @@ def projector(config: list[str]):
     # config was augmented and rewritten with cached data
     # so the write needs to occur at the very end of initialization
     if not debug:
-        with (out / "config.yml").open(mode="w") as fd:
+        with (out / "config.yaml").open(mode="w") as fd:
             yaml.dump(config, fd)
 
-    print_banner()
-    log.info("✝ rise, if you would")
+    print("\n" + irt2m.banner + "\n")
+    log.info("> rise, if you would")
 
     fit(trainer, model, datamodule, debug)

@@ -14,7 +14,10 @@ from ktz.filesystem import path as kpath
 
 _root_path = kpath(__file__).parent.parent
 
-# env vars
+#
+# ENV VARS
+#
+
 ENV_DIR_DATA = "IRT2M_DATA"
 
 ENV_LOG_CONF = "IRT2M_LOG_CONF"
@@ -27,6 +30,11 @@ if ENV_DIR_DATA in os.environ:
     _data_path = kpath(os.environ[ENV_DIR_DATA])
 else:
     _data_path = kpath(_root_path / "data", create=True)
+
+
+#
+# CONFIGURATION
+#
 
 
 class _DIR:
@@ -50,6 +58,7 @@ class IRT2Error(Exception):
 
 
 # special tokenizer tokens
+# TODO move to irt2m.data
 class TOKEN(Enum):
     """Special tokens used by the BERT Tokenizer."""
 
@@ -61,6 +70,11 @@ class TOKEN(Enum):
     def values(Self):
         """Get a list of token identifier."""
         return [e.value for e in Self]
+
+
+#
+# LOGGING
+#
 
 
 log = logging.getLogger(__name__)
@@ -102,3 +116,13 @@ def init_logging():
         logging.captureWarnings(True)
 
     log.info("logging initialized")
+
+
+#
+# MISC
+#
+banner = """
+ ┌──────────────────────────────┐
+ │ IRT2M COMMAND LINE INTERFACE │
+ └──────────────────────────────┘
+"""

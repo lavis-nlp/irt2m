@@ -564,7 +564,8 @@ class Projector(Base):
 
     @property
     def subbatch_size(self) -> int:
-        return self.config["module"]["train_loader_kwargs"]["subbatch_size"]
+        return self.trainer.train_dataloader.loaders.subbatch_size
+
 
     # /properties and initialization
     # ----------------------------------------
