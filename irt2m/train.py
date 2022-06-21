@@ -439,6 +439,6 @@ def projector(config: list[str]):
             yaml.dump(config, fd)
 
     print("\n" + irt2m.banner + "\n")
-    log.info("> rise, if you would")
+    log.info("--- rise, if you would")
 
     fit(trainer, model, datamodule, debug)
