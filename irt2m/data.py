@@ -661,7 +661,7 @@ class FlatDataset(RingDataset):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        log.info(">[flattening]< rings for >[{self.kind}]<")
+        log.info(f"flattening rings for >[{self.kind}]<")
         self._flat = []
 
         for key, ring in self.rings.items():
@@ -713,7 +713,7 @@ class VertexRingDataset(VertexDataset, RingDataset):
     def __init__(self, *args, **kwargs):
         log.info("create >[vertex ringbuffer]< dataset")
         super().__init__(*args, **kwargs)
-        log.info("created vertex ringbuffer dataset with {len(self)} samples")
+        log.info(f"created vertex ringbuffer dataset with {len(self)} samples")
 
     @property
     def description(self) -> str:
@@ -757,7 +757,7 @@ class MentionRingDataset(MentionDataset, RingDataset):
     def __init__(self, *args, **kwargs):
         log.info("create >[mention ringbuffer]< dataset")
         super().__init__()
-        log.info("created mention ringbuffer dataset with {len(self)} samples")
+        log.info(f"created mention ringbuffer dataset with {len(self)} samples")
 
     @property
     def description(self) -> str:
@@ -780,7 +780,7 @@ class VertexFlatDataset(VertexDataset, FlatDataset):
     def __init__(self, *args, **kwargs):
         log.info("create >[flat vertex]< dataset")
         super().__init__(*args, **kwargs)
-        log.info("initialized vertex flat dataset with {len(self)} samples")
+        log.info(f"initialized vertex flat dataset with {len(self)} samples")
 
     @property
     def description(self) -> str:
@@ -823,7 +823,7 @@ class MentionFlatDataset(MentionDataset, FlatDataset):
     def __init__(self, *args, **kwargs):
         log.info("create >[flat mention]< dataset")
         super().__init__(*args, **kwargs)
-        log.info("initialized mention flat dataset with {len(self)} samples")
+        log.info(f"initialized mention flat dataset with {len(self)} samples")
 
     @property
     def description(self) -> str:
