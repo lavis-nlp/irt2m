@@ -6,7 +6,7 @@ import logging
 import sys
 from contextlib import contextmanager
 from functools import cached_property
-from itertools import zip_longest
+from itertools import count, groupby, zip_longest
 from pathlib import Path
 from typing import Literal, Union
 
@@ -752,6 +752,48 @@ class SingleAffineProjector(Projector):
         # return torch.dist(projected, target, p=2) / projected.shape[0]
 
 
+class MultiAffineProjector(Projector):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.loss = torch.nn.MSELoss()
+        self.projector = torch.nn.Linear(
+            self.encoder.config.hidden_size,
+            self.kgc.embedding_dim,
+        )
+
+    def aggregate(self, encoded):
+        return encoded[:, 0]
+
+    def reduce(self, aggregated, samples):
+        # inner-batch indexes
+        counter = count()
+
+        keys = {sample.key: sample for sample in samples}
+        flat = [sample.key for sample in samples]
+
+        # e.g. given two entities and a batch_size of 5:
+        # (8, 8, 8, 7, 7) -> [(8, [0, 1, 2]), (7, [3, 4])]
+        grouped = [
+            (entity, [next(counter) for _ in grouper])
+            for entity, grouper in groupby(flat)
+        ]
+
+        # batch x kge_dims -> unique entities x kge_dims
+        pooled = [aggregated[idxs].max(axis=0).values for _, idxs in grouped]
+        pooled = torch.vstack(pooled)
+
+        unique_keys = tuple(zip(*grouped))[0]
+        return pooled, [keys[key] for key in unique_keys]
+
+    def project(self, reduced: Tensor):
+        return self.projector(reduced)
+
+    def compare(self, projected, target):
+        return self.loss(projected, target)
+
+
 MODELS = {
     "single context affine projector": SingleAffineProjector,
+    "multi context affine projector": MultiAffineProjector,
 }

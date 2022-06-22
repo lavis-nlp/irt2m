@@ -258,7 +258,11 @@ def fit(trainer, model, datamodule, debug):
 
 # registers config['prefix']
 def _config_add_prefix(config, irt2) -> str:
-    model = {"single context affine projector": "PSA"}[config["model"]]
+    model = {
+        "single context affine projector": "PSA",
+        "multi context affine projector": "PMA",
+    }[config["model"]]
+
     if config["model"].endswith("projector"):
         model += {"complex": "C"}[list(config["kgc"])[0]]
 
