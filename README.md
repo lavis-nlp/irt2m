@@ -19,17 +19,20 @@ pip install -e .[dev]
 
 This section details how to conduct the two-step training approach
 outlined by [1, 2]. Here, a KGC model is trained on the closed-world
-graph (`IRT2.closed_triples`). Subsequent, a projector is trained to
+graph (`IRT2.closed_triples`). Subsequently, a projector is trained to
 align input text descriptions with the trained KG-Embeddings.
+
+
+### Closed-World KGC Model Training
 
 First, train a closed-world KGC model:
 
 ```
  $ irt2m train kgc --help
  Usage: irt2m train kgc [OPTIONS]
- 
+
    Train a KGC model using PyKEEN.
-   
+
    Options:
      -c, --config TEXT           configuration file  [required]
      --learning-rate FLOAT       optimizers' learning rate
@@ -53,6 +56,35 @@ It is also possible to run a hyperparameter search (using W&B sweeps):
 ```
 wandb sweep conf/models/kgc/wandb/large-complex-slcwa-random.yaml
 wandb agent URL
+```
+
+The main code entry point can be found in `irt2m.train.kgc(...)`.
+
+
+### Open-World Projector Training
+
+Secondly, a projector is trained. This is quite straight forward from the CLI:
+
+```
+Usage: irt2m train projector [OPTIONS]
+
+  Train a projector that maps text to KGC vertices.
+
+Options:
+  -c, --config TEXT  configuration file  [required]
+  --help             Show this message and exit.
+```
+
+Please have a look at the configuration files in
+`conf/models/projector/*yaml` for a detailed description of all
+configuration options. The main code entry point can be found in
+`irt2m.train.projector(...)`.
+
+For example, training a single context projector on CDE-L:
+
+```
+conf=conf/models/projector
+irt2m train projector -c $conf/base.yaml -c $conf/data/irt2-cde-large.yaml
 ```
 
 
