@@ -731,6 +731,8 @@ class SingleAffineProjector(Projector):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        self.loss = torch.nn.MSELoss()
+
         self.projector = torch.nn.Linear(
             self.encoder.config.hidden_size,
             self.kgc.embedding_dim,
@@ -746,7 +748,8 @@ class SingleAffineProjector(Projector):
         return self.projector(reduced)
 
     def compare(self, projected, target):
-        return torch.dist(projected, target, p=2) / projected.shape[0]
+        return self.loss(projected, target)
+        # return torch.dist(projected, target, p=2) / projected.shape[0]
 
 
 MODELS = {
