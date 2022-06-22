@@ -27,6 +27,9 @@ from irt2m import data
 
 log = logging.getLogger(__name__)
 
+# suppress the annoying bert-base* load warnings
+tf.logging.set_verbosity_error()
+
 
 # --
 
@@ -108,9 +111,9 @@ IDX = int
 
 class KGC:
     """
-    Maintains a trained PyKEEN model.
+    Maintains a trained PyKEEN 1.8.1 model.
 
-    Some notes regarding Embeddings as maintained by PyKEEN:
+    Some notes regarding embeddings as maintained by PyKEEN:
 
 
     Data Model
@@ -169,8 +172,11 @@ class KGC:
     Conclusion
     ----------
 
-    We simply access the private _embeddings.weight
-    and leave the interpretation for PyKEEN when scoring.
+    We can simply access the private _embeddings.weight and leave
+    the interpretation for PyKEEN when scoring as we are only
+    interested in geometric difference (as in norm). And this feature
+    -wise difference allows us to to leave the interpretation opaque.
+
     """
 
     name: str
@@ -374,11 +380,12 @@ class Projector(Base):
     def update_projections(
         self,
         projected: Tensor,
-        indexes: list[int],
+        samples: list[data.ProjectorSample],
     ):
-        assert len(indexes) == projected.shape[0]
+        assert len(samples) == projected.shape[0]
 
-        for v, idx in zip(projected.detach(), indexes):
+        idxs = [self.kgc.key2idx(s.keyname, s.key) for s in samples]
+        for v, idx in zip(projected.detach(), idxs):
             self.projections[idx] += v
             self.projections_counts[idx] += 1
 
@@ -514,14 +521,11 @@ class Projector(Base):
             "hits@10": results.get_metric("both.realistic.hits_at_10"),
         }
 
-        # cannot use self.log because lightning gets all teary-eyed
-        # if you want to log on_step from on_epoch* callbacks etc.
         # (self.logger may be None if fast_dev_run)
-
         if self.logger is not None:
             self.logger.log_metrics(
                 {f"{which.value}/{key}": val for key, val in metrics.items()},
-                self.global_step,
+                self.current_epoch,
             )
 
         realistic = results.to_dict()["both"]["realistic"]
@@ -565,7 +569,6 @@ class Projector(Base):
     @property
     def subbatch_size(self) -> int:
         return self.trainer.train_dataloader.loaders.subbatch_size
-
 
     # /properties and initialization
     # ----------------------------------------
@@ -618,17 +621,10 @@ class Projector(Base):
 
             loss = self.compare(projections, targets)
             losses.append(loss)
-
-            # TODO scale loss?
-            # self.manual_backward(loss / len(subbatches))
+            # TODO scale? self.manual_backward(loss / len(subbatches))
             self.manual_backward(loss)
 
-            # while training, the projections are associated
-            # with the respective vertex id: no remapping required
-            self.update_projections(
-                projections,
-                [s.key for s in reduced_samples],
-            )
+            self.update_projections(projections, reduced_samples)
 
         optimizer.step()
         optimizer.zero_grad()
@@ -644,11 +640,7 @@ class Projector(Base):
         batch_idx,
     ):
         projections, reduced_samples = self.forward(collation)
-        idxs = [self.kgc.key2idx(s.keyname, s.key) for s in reduced_samples]
-
-        # while validating, the projections are associated with the
-        # respective mention id: remapping to kgc index required
-        self.update_projections(projections, idxs)
+        self.update_projections(projections, reduced_samples)
 
     def on_fit_start(self):
         print("\nFITTING\n")

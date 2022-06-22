@@ -219,7 +219,7 @@ def load_tokenizer(
     ----------
     path : Path
         Where the tokenizer should be saved to
-    model_name : Optional[str]
+    model : Optional[str]
         One of the models provided by huggingface
 
     Returns
@@ -376,12 +376,29 @@ class ProjectorSample:
         return [convert(idxs) for idxs in self.indexes]
 
 
+#   Dataset Hierarchie
+#   ------------------
+#
+#   - ABC:RingDataset
+#     [handles loading and caching of tokenized contexts]
+#
+#     - VertexRingDataset [key=VID]
+#     - MentionRingDataset [key=MID]
+#
+#     - ABC:FlatDataset
+#       [flattens data to iterate all provided contexts in an epoch]
+#       - VertexFlatDataset [key=VID]
+#       - MentionFlatDataset [key=MID]
+#
+#  RingDataset is the base class because it makes the pruning step
+#  canonical for every other implementation.
+
+
 # not using abc to avoid multi-inheritance
 class RingDataset(td.Dataset):
     """Offer samples and a batch collator."""
 
-    kind: Kind
-    model_name: str
+    kind: Kind  # train, valid, test
     contexts_per_sample: int
 
     irt2: IRT2
@@ -619,35 +636,73 @@ class RingDataset(td.Dataset):
 
         return padded, samples
 
-    # ---
+    def encode(self, key: Hashable, tokenized: Indexes) -> bytes:
+        """Encode a sample to a single line."""
+        return encode_line((key,) + tokenized, sep=" ", fn=str)
+
+    def decode(self, encoded: bytes) -> tuple[Hashable, int, ...]:
+        """Decode a single-line sample."""
+        return decode_line(encoded, sep=" ", fn=int)
+
+    # --- interface
 
     def create_key(self, context: Context) -> Hashable:
         """Define a sample based on a context."""
         raise NotImplementedError()
 
-    def encode(self, key: Hashable, tokenized: Indexes) -> bytes:
-        """Encode a sample to a single line."""
-        raise NotImplementedError()
 
-    def decode(self, encoded: bytes) -> tuple[Hashable, int, ...]:
-        """Decode a single-line sample."""
-        raise NotImplementedError()
+class FlatDataset(RingDataset):
+    def __len__(self):
+        return len(self._flat)
+
+    def __getitem__(self, i: int):
+        return self._flat[i]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        log.info(">[flattening]< rings for >[{self.kind}]<")
+        self._flat = []
+
+        for key, ring in self.rings.items():
+            for indexes in ring:
+                self._flat.append(
+                    ProjectorSample(
+                        key=key,
+                        keyname=self.keyname,
+                        indexes=(tuple(indexes),),
+                    )
+                )
 
 
-# --- OPEN WORLD PROJECTOR TRAINING
+class VertexDataset:
+
+    keyname = "vid"
+
+    def create_key(self, context) -> VID:
+        """A sample is a closed-world vertex."""
+        return self.irt2.mid2vid[context.mid]
 
 
-class ProjectorDataset(RingDataset):
-    def encode(self, key, tokenized) -> bytes:
-        """Encode key and tokens as a flat id list."""
-        return encode_line((key,) + tokenized, sep=" ", fn=str)
+class MentionDataset:
 
-    def decode(self, encoded: bytes):
-        """Decode key, *tokens from single id line."""
-        return decode_line(encoded, sep=" ", fn=int)
+    keyname = "mid"
+
+    def create_key(self, context) -> VID:
+        """A sample is a closed-world vertex."""
+        return context.mid
 
 
-class ProjectorVertexDataset(ProjectorDataset):
+# ---
+
+# Multi-inheritance in python is not multi-inheritance
+# per-se but a MRO mixin of classes. It is important
+# to write the vertex/mention-dataset first so that
+# per MRO create_key can be used when building a ring-
+# or flat-dataset.
+
+
+class VertexRingDataset(VertexDataset, RingDataset):
     """
     Projector training dataset.
 
@@ -655,20 +710,16 @@ class ProjectorVertexDataset(ProjectorDataset):
     of all its mentions.
     """
 
-    keyname = "vid"
-
     def __init__(self, *args, **kwargs):
-        log.info("create >[vertex]< based ringbuffer dataset")
+        log.info("create >[vertex ringbuffer]< dataset")
         super().__init__(*args, **kwargs)
-
-    def create_key(self, context) -> VID:
-        """A sample is a closed-world vertex."""
-        return self.irt2.mid2vid[context.mid]
+        log.info("created vertex ringbuffer dataset with {len(self)} samples")
 
     @property
     def description(self) -> str:
         idx = random.randint(0, len(self))
-        vid = self.keys[idx]
+        sample = self[idx]
+        vid = sample.key
 
         vid2mid = dict(
             train=self.irt2.closed_mentions,
@@ -694,65 +745,19 @@ class ProjectorVertexDataset(ProjectorDataset):
             """
         )
 
-        return header + textwrap.indent(self[idx].description, prefix="  ")
+        body = textwrap.indent(sample.description, prefix="  ")
+        return header + body
 
 
-class ProjectorMentionDataset(ProjectorDataset):
+class MentionRingDataset(MentionDataset, RingDataset):
     """
     Each sample is a mention with associated text contexts.
     """
 
-    keyname = "mid"
-
     def __init__(self, *args, **kwargs):
-        log.info("create >[mention]< based ringbuffer dataset")
-        super().__init__(*args, **kwargs)
-
-    def create_key(self, context) -> VID:
-        """A sample is a closed-world vertex."""
-        return context.mid
-
-    @property
-    def description(self) -> str:
-        idx = random.randint(0, len(self))
-        mid = self.keys[idx]
-
-        header = textwrap.dedent(
-            f"""
-            PROJECTOR MENTION DATASET
-            Example Sample {idx}: {self.irt2.mentions[mid]} ({mid=}):
-            """
-        )
-
-        return header + textwrap.indent(self[idx].description, prefix="  ")
-
-
-class ProjectorMentionFlatDataset(ProjectorMentionDataset):
-    """
-    Iterates all texts in an epoch: used for validation/test.
-    """
-
-    def __len__(self):
-        return len(self._flat)
-
-    def __getitem__(self, i: int):
-        return self._flat[i]
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        log.info(">[flattening rings]< for validation/test")
-        self._flat = []
-
-        for key, ring in self.rings.items():
-            for indexes in ring:
-                self._flat.append(
-                    ProjectorSample(
-                        key=key,
-                        keyname=self.keyname,
-                        indexes=(tuple(indexes), ),
-                    )
-                )
+        log.info("create >[mention ringbuffer]< dataset")
+        super().__init__()
+        log.info("created mention ringbuffer dataset with {len(self)} samples")
 
     @property
     def description(self) -> str:
@@ -762,13 +767,87 @@ class ProjectorMentionFlatDataset(ProjectorMentionDataset):
 
         header = textwrap.dedent(
             f"""
-            PROJECTOR MENTION DATASET
+            MENTION RING DATASET
             Example Sample {idx}: {self.irt2.mentions[mid]} ({mid=}):
             """
         )
 
-        return header + textwrap.indent(self[idx].description, prefix="  ")
+        body = textwrap.indent(sample.description, prefix="  ")
+        return header + body
 
+
+class VertexFlatDataset(VertexDataset, FlatDataset):
+    def __init__(self, *args, **kwargs):
+        log.info("create >[flat vertex]< dataset")
+        super().__init__(*args, **kwargs)
+        log.info("initialized vertex flat dataset with {len(self)} samples")
+
+    @property
+    def description(self) -> str:
+        idx = random.randint(0, len(self))
+        sample = self[idx]
+        vid = sample.key
+
+        vid2mid = dict(
+            train=self.irt2.closed_mentions,
+            valid=self.irt2.open_mentions_val,
+            test=self.irt2.open_mentions_test,
+        )[self.kind]
+
+        max_mentions = 5
+
+        mentions = ", ".join(
+            f"{self.irt2.mentions[mid]} ({mid=})"
+            for mid in list(vid2mid[vid])[:max_mentions]
+        )
+
+        header = textwrap.dedent(
+            f"""
+            VERTEX FLAT DATASET ({len(self)} samples)
+            Sample {idx}: {self.irt2.vertices[vid]} ({vid=}):
+              Mentions ({max_mentions}/{len(vid2mid[vid])}:
+              {mentions}
+
+            """
+        )
+
+        body = textwrap.indent(sample.description, prefix="  ")
+        return header + body
+
+
+class MentionFlatDataset(MentionDataset, FlatDataset):
+    """
+    Iterates all texts in an epoch: used for validation/test.
+    """
+
+    def __init__(self, *args, **kwargs):
+        log.info("create >[flat mention]< dataset")
+        super().__init__(*args, **kwargs)
+        log.info("initialized mention flat dataset with {len(self)} samples")
+
+    @property
+    def description(self) -> str:
+        idx = random.randint(0, len(self))
+        sample = self[idx]
+        mid = sample.key
+
+        header = textwrap.dedent(
+            f"""
+            MENTION FLAT DATASET ({len(self)} samples)
+            Example Sample {idx}: {self.irt2.mentions[mid]} ({mid=}):
+            """
+        )
+
+        body = textwrap.indent(sample.description, prefix="  ")
+        return header + body
+
+
+PROJECTOR_DATASETS = {
+    "vertex ringbuffer": VertexRingDataset,
+    "vertex flat": VertexFlatDataset,
+    "mention ringbuffer": MentionRingDataset,
+    "mention flat": MentionFlatDataset,
+}
 
 
 class ProjectorTrainLoader(td.DataLoader):
@@ -785,13 +864,6 @@ class ProjectorTrainLoader(td.DataLoader):
         assert batch_size
         super().__init__(*args, batch_size=batch_size, **kwargs)
         self.subbatch_size = subbatch_size or batch_size
-
-
-PROJECTOR_DATASETS = {
-    "vertex ringbuffer": ProjectorVertexDataset,
-    "mention ringbuffer": ProjectorMentionDataset,
-    "mention flat": ProjectorMentionFlatDataset,
-}
 
 
 class ProjectorModule(pl.LightningDataModule):
