@@ -229,6 +229,18 @@ class KGC:
         ow = sorted(self.idx2mid)
         return torch.LongTensor(ow)
 
+    @cached_property
+    def open_world_idxs_val(self) -> torch.LongTensor:
+        ht = self.dataset.validation.mapped_triples[:, (0, 2)]
+        idxs = {v for v in ht.ravel() if v in self.open_world_idxs}
+        return torch.LongTensor(list(idxs))
+
+    @cached_property
+    def open_world_idxs_test(self) -> torch.LongTensor:
+        ht = self.dataset.testing.mapped_triples[:, (0, 2)]
+        idxs = {v for v in ht.ravel() if v in self.open_world_idxs}
+        return torch.LongTensor(list(idxs))
+
     def __init__(self, irt2: IRT2, config):
         self.config = config
 
@@ -357,6 +369,29 @@ class Projector(Base):
         self.projections_counts.zero_()
         self._gathered_projections = False
 
+    def _log_projection_stats(self):
+        def _perc(f):
+            return f"{f * 100:2.2f}%"
+
+        def _stats(which, idxs):
+            projections = self.projections_counts[idxs]
+
+            mask = projections != 0
+            count = mask.sum()
+            total = projections[mask].sum().item()
+            ratio = count / total
+            perc = _perc(count / len(idxs))
+
+            log.info(
+                f" >[{which} projections]< "
+                f" {count}/{len(idxs)} ({perc}) items"
+                f" with {total} projections ({ratio=:2.3f})"
+            )
+
+        _stats("transductive", self.kgc.closed_world_idxs)
+        _stats("inductive", self.kgc.open_world_idxs_val)
+        _stats("test", self.kgc.open_world_idxs_test)
+
     def gather_projections(self):
         if self.global_step == 0:
             log.info("skipping projection gathering (not trained yet)!")
@@ -364,13 +399,7 @@ class Projector(Base):
             self._gathered_projections = True
             return
 
-        count = int(self.projections_counts.sum().item())
-        total = len(self.projections_counts)
-
-        log.info(
-            f"averaging {count} projections for"
-            f" {total} embeddings ({count/total:2.3f})"
-        )
+        self._log_projection_stats()
 
         # calculate averages over all projections
         mask = self.projections_counts != 0
@@ -583,13 +612,24 @@ class Projector(Base):
         print(self.kgc.dataset.summary_str())
         print()
 
+    # /properties and initialization
+    # ----------------------------------------
+    # lightning callbacks and training
+
     @property
     def subbatch_size(self) -> int:
         return self.trainer.train_dataloader.loaders.subbatch_size
 
-    # /properties and initialization
-    # ----------------------------------------
-    # lightning callbacks
+    def _subbatch(self, batch, samples):
+        # sub-batching and gradient accumulation
+        N = len(samples)
+        steps = range(0, N, self.subbatch_size)
+
+        subbatches = list(zip_longest(steps, steps[1:], fillvalue=N))
+        for j, k in subbatches:
+            yield batch[j:k], samples[j:k]
+
+    # --
 
     def forward(
         self,
@@ -616,31 +656,20 @@ class Projector(Base):
         collation: tuple[Tensor, list[data.ProjectorSample]],
         batch_idx,
     ):
-        # sub-batching and gradient accumulation
-        batch, samples = collation
-
         losses = []
         optimizer = self.optimizers()
 
-        N = len(samples)
-        steps = range(0, N, self.subbatch_size)
-
-        subbatches = list(zip_longest(steps, steps[1:], fillvalue=N))
-        for j, k in subbatches:
-
-            # unique keys many
-            subcollation = batch[j:k], samples[j:k]
+        batch, samples = collation
+        for subcollation in self._subbatch(batch, samples):
             projections, reduced_samples = self.forward(subcollation)
 
             idxs = [self.kgc.key2idx(s.keyname, s.key) for s in reduced_samples]
-            idxs = torch.LongTensor(idxs).to(device=self.device)
             targets = self.targets[idxs]
 
             loss = self.compare(projections, targets)
             losses.append(loss)
-            # TODO scale? self.manual_backward(loss / len(subbatches))
-            self.manual_backward(loss)
 
+            self.manual_backward(loss)
             self.update_projections(projections, reduced_samples)
 
         optimizer.step()
@@ -656,6 +685,7 @@ class Projector(Base):
         collation: tuple[Tensor, list[data.ProjectorSample]],
         batch_idx,
     ):
+        batch, samples = collation
         projections, reduced_samples = self.forward(collation)
         self.update_projections(projections, reduced_samples)
 
