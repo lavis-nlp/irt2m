@@ -28,6 +28,23 @@ log = logging.getLogger(__name__)
 
 # --
 
+# used for logging
+REG = {
+    "single context affine projector": dict(
+        prefix="PSA",
+        tags=["single", "projector"],
+    ),
+    "multi context affine projector": dict(
+        prefix="PMA",
+        tags=["multi", "projector"],
+    ),
+}
+
+assert set(REG) == set(MODELS), "missing registry information"
+
+
+# --
+
 
 def set_seed(config, seed: Optional[int] = None):
     if seed is not None:
@@ -258,16 +275,15 @@ def fit(trainer, model, datamodule, debug):
 
 # registers config['prefix']
 def _config_add_prefix(config, irt2) -> str:
-    model = {
-        "single context affine projector": "PSA",
-        "multi context affine projector": "PMA",
-    }[config["model"]]
+    prefix = REG[config["model"]]["prefix"]
 
-    if config["model"].endswith("projector"):
-        model += {"complex": "C"}[list(config["kgc"])[0]]
+    if "kgc" in config:
+        kgc_model = list(config["kgc"])[0]
+        if kgc_model == "complex":
+            prefix += "C"
 
     data = irt2.name[-1]
-    config["prefix"] = f"{model}-{data}"
+    config["prefix"] = f"{prefix}-{data}"
 
 
 # registers config['tags']
@@ -279,7 +295,10 @@ def _config_add_tags(config, irt2) -> str:
     ]
 
     if config["model"].endswith("projector"):
-        tags += ["projector"] + list(config["kgc"])
+        tags += REG[config["model"]]["tags"]
+
+    if "kgc" in config:
+        tags += list(config["kgc"])
 
     config["tags"] = tags
 
