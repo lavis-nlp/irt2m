@@ -11,7 +11,7 @@ module:
   train_ds_kwargs:
     seed: 5012022
     contexts_per_sample: 10  # per batch
-    max_contexts_per_sample: 100
+    max_contexts_per_sample: 1000
   train_loader_kwargs:
     shuffle: true
     batch_size: 1
@@ -25,3 +25,8 @@ module:
   valid_loader_kwargs:
     shuffle: false
     batch_size: 3
+
+# for available optimizers see irt2m.models.OPTIMIZERS
+optimizer: adam
+optimizer_kwargs:
+  lr: 1.0e-06

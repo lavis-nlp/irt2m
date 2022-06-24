@@ -24,3 +24,8 @@ module:
   valid_loader_kwargs:
     shuffle: false
     batch_size: 30
+
+# for available optimizers see irt2m.models.OPTIMIZERS
+optimizer: adam
+optimizer_kwargs:
+  lr: 5.0e-05

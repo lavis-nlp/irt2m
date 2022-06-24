@@ -336,6 +336,7 @@ class Projector(Base):
 
         log.info(f"registered projections buffer: {self.projections.shape}")
         log.info(f"registered target tensor: {self.targets.shape}")
+        self._gathered_projections = False
 
     def clear_projections(self):
         """
@@ -359,6 +360,7 @@ class Projector(Base):
     def gather_projections(self):
         if self.global_step == 0:
             log.info("skipping projection gathering (not trained yet)!")
+            self.clear_projections()
             self._gathered_projections = True
             return
 
@@ -388,6 +390,18 @@ class Projector(Base):
         for v, idx in zip(projected.detach(), idxs):
             self.projections[idx] += v
             self.projections_counts[idx] += 1
+
+    def projection_error(self):
+        assert self._gathered_projections
+
+        idxs = self.kgc.closed_world_idxs
+        mask = self.projections_counts[idxs] != 0
+
+        projections = self.projections[idxs][mask]
+        targets = self.targets[idxs][mask]
+
+        error = self.compare(projections, targets)
+        return error
 
     # kgc embedding shenanigans
 
@@ -521,12 +535,15 @@ class Projector(Base):
             "hits@10": results.get_metric("both.realistic.hits_at_10"),
         }
 
+        # can not use this because than checkpointing does not work
         # (self.logger may be None if fast_dev_run)
-        if self.logger is not None:
-            self.logger.log_metrics(
-                {f"{which.value}/{key}": val for key, val in metrics.items()},
-                self.current_epoch,
-            )
+        # if self.logger is not None:
+        #     self.logger.log_metrics(
+        #         {f"{which.value}/{key}": val for key, val in metrics.items()},
+        #         self.current_epoch,
+        #     )
+
+        self.log_dict({f"{which.value}/{key}": val for key, val in metrics.items()})
 
         realistic = results.to_dict()["both"]["realistic"]
         log.info(f"{which.value}: >[{realistic['hits_at_10'] * 100:2.3f}]< h@10")
@@ -672,6 +689,13 @@ class Projector(Base):
         log.info("validation epoch end")
 
         self.gather_projections()
+
+        # log the average distance between projections
+        # and targets (somewhat of a validation loss)
+
+        if not self.global_step == 0:
+            error = self.projection_error()
+            self.log("training/projection_error", error)
 
         # continuously log the baseline for a nice transductive plot
         train = Evaluation.kgc_train
