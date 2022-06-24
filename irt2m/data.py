@@ -756,7 +756,7 @@ class MentionRingDataset(MentionDataset, RingDataset):
 
     def __init__(self, *args, **kwargs):
         log.info("create >[mention ringbuffer]< dataset")
-        super().__init__()
+        super().__init__(*args, **kwargs)
         log.info(f"created mention ringbuffer dataset with {len(self)} samples")
 
     @property
