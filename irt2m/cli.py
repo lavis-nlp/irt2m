@@ -115,7 +115,7 @@ def grp_evaluate():
 
 @grp_evaluate.command(name="projector")
 @click.option(
-    "--data",
+    "--source",
     type=str,
     required=True,
     # multiple=True  # TODO run for all
@@ -127,6 +127,24 @@ def grp_evaluate():
     required=False,
     help="checkpoint name (e.g. last.ckpt); otherwise load best",
 )
+@click.option(
+    "--batch-size",
+    type=int,
+    required=False,
+    help="batch-size, otherwise use validation batch size",
+)
 def evaluate_projector(**kwargs):
     """Evaluate a projector model"""
     eval.projector(**kwargs)
+
+
+@grp_evaluate.command(name="create-report")
+@click.option(
+    "--folder",
+    type=str,
+    required=True,
+    help="directory where checkpoints can be found",
+)
+def create_evaluation_report(**kwargs):
+    """Evaluate a projector model"""
+    eval.create_report(**kwargs)
