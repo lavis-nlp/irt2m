@@ -134,6 +134,8 @@ def create_ow_pykeen_dataset(irt2) -> pykeen.datasets.Dataset:
     mids = val_mids | test_mids
 
     closed_vids = {v for h, t, r in irt2.closed_triples for v in (h, t)}
+    open_vids = set(irt2.vertices) - closed_vids
+
     offset = max(closed_vids) + 1
 
     mid2idx = {mid: i + offset for i, mid in enumerate(mids)}
@@ -155,8 +157,18 @@ def create_ow_pykeen_dataset(irt2) -> pykeen.datasets.Dataset:
         )
 
     def build_tripleset(head_task, tail_task):
-        heads = set((mid2idx[mid], rid, vid) for mid, rid, vid in triples(head_task))
-        tails = set((vid, rid, mid2idx[mid]) for mid, rid, vid in triples(tail_task))
+        heads = set(
+            (mid2idx[mid], rid, vid)
+            for mid, rid, vid in triples(head_task)
+            if vid not in open_vids
+        )
+
+        tails = set(
+            (vid, rid, mid2idx[mid])
+            for mid, rid, vid in triples(tail_task)
+            if vid not in open_vids
+        )
+
         return heads | tails
 
     # htr -> hrt as pykeen requires
