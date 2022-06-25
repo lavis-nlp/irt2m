@@ -185,7 +185,7 @@ class Projector(Base):
 
     def _log_projection_stats(self):
         def _perc(f):
-            return f"{round(f * 100)}%"
+            return f"{round(f.item() * 100)}%"
 
         def _stats(which, idxs):
             projections = self.projections_counts[idxs]
@@ -193,7 +193,7 @@ class Projector(Base):
             mask = projections != 0
             count = mask.sum()
             total = int(projections[mask].sum().item())
-            ratio = count / total
+            ratio = total / count
             perc = _perc(count / len(idxs))
 
             log.info(
@@ -207,7 +207,7 @@ class Projector(Base):
         _stats("test", self.kgc.open_world_idxs_test)
 
     def gather_projections(self):
-        if not self.training or self.global_step == 0:
+        if self.global_step == 0:
             log.info("skipping projection gathering (not trained yet)!")
             self.clear_projections()
             self._gathered_projections = True
