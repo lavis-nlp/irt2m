@@ -5,10 +5,7 @@ import enum
 import logging
 import sys
 from contextlib import contextmanager
-from functools import cached_property
 from itertools import count, groupby, zip_longest
-from pathlib import Path
-from typing import Literal, Union
 
 import pykeen.datasets
 import pykeen.evaluation
@@ -18,7 +15,6 @@ import torch
 import transformers as tf
 import yaml
 from irt2.dataset import IRT2
-from irt2.types import MID, VID
 from ktz.filesystem import path as kpath
 from torch import Tensor
 
@@ -103,188 +99,6 @@ class Base(pl.LightningModule):
 # --- OPEN WORLD PROJECTOR TRAINING
 
 
-# index internally used to maintain
-# a global, gapless numbering of entitites
-# to be scored by the PyKEEN triple scorers
-IDX = int
-
-
-class KGC:
-    """
-    Maintains a trained PyKEEN 1.8.1 model.
-
-    Some notes regarding embeddings as maintained by PyKEEN:
-
-
-    Data Model
-    ----------
-
-    model = self.kgc.model
-
-    model.entity_representations:
-      torch.nn.modules.container.ModuleList
-
-    model.entity_representations[0]:
-      pykeen.nn.representation.Embedding
-
-    model.entity_representations[0]._embeddings:
-      torch.nn.modules.sparse.Embedding
-
-    model.entity_representations[0]._embeddings.weight:
-      torch.nn.parameter.Parameter
-
-
-    Data Types
-    ----------
-
-    Let's see for ComplEx where the complex numbers are:
-
-    idxs = torch.LongTensor([0])
-    f = torch.is_complex
-
-    f(model.entity_representations[0]._embeddings.weight)
-      False
-
-    f(self.kgc.model.entity_representations[0]._embeddings(idxs))
-      False
-
-    f(self.kgc.model.entity_representations[0](idxs))
-      True
-
-    This is because PyKEEN saves data as real-valued (n, 2*d) sized
-    real embeddings and in the forward method torch.view_as_complex
-    is called (torch.nn.Embedding has no complex number support yet).
-
-    Side note:
-      - view_as_complex: N x D x 2 -> N x D
-      - view_as_real:    N x D -> N x D x 2
-      - PyKEEN seems to encode it as N x 2D where the data is saved
-        with stride; for a complex vector [c_1, c_2, ...] c_1 = r_1 + i * i_1
-        the view_as_real view would be [[r_1, r_2, ...], [i_1, i_2, ...]]
-        and PyKEEN saves it as [r_1, c_1, r_2, c_2, ...]
-
-
-    See also:
-     - https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L353
-     - https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L410
-
-
-    Conclusion
-    ----------
-
-    We can simply access the private _embeddings.weight and leave
-    the interpretation for PyKEEN when scoring as we are only
-    interested in geometric difference (as in norm). And this feature
-    -wise difference allows us to to leave the interpretation opaque.
-
-    """
-
-    name: str
-    path: Path
-
-    config: data.Config
-    mid2idx: dict[MID, IDX]
-
-    model: pykeen.models.ERModel
-    dataset: pykeen.datasets.Dataset
-
-    @cached_property
-    def idx2mid(self) -> dict[IDX, MID]:
-        return {v: k for k, v in self.mid2idx.items()}
-
-    @cached_property
-    def idx2str(self) -> dict[IDX, str]:
-        return {v: k for k, v in self.dataset.entity_to_id.items()}
-
-    @property
-    def cw_entity_embedding(self) -> pykeen.nn.representation.Embedding:
-        return self.model.entity_representations[0]
-
-    @property
-    def relation_embedding(self) -> pykeen.nn.representation.Embedding:
-        return self.model.relation_representations[0]
-
-    @cached_property
-    def num_embeddings(self):
-        return max(self.dataset.entity_to_id.values()) + 1
-
-    @cached_property
-    def embedding_dim(self) -> int:
-        # this returns 1000 for 500 dimensional complex embeddings
-        return self.cw_entity_embedding.embedding_dim
-
-    @cached_property
-    def closed_world_idxs(self) -> torch.LongTensor:
-        # simply use the available vids
-        # information of dataset.training.entity_ids etc is not usable
-        # because all share the whole entity set
-
-        ht = self.dataset.training.mapped_triples[:, (0, 2)]
-        cw = sorted(set(ht.ravel().tolist()))
-
-        return torch.LongTensor(sorted(cw))
-
-    @cached_property
-    def open_world_idxs(self) -> torch.LongTensor:
-        ow = sorted(self.idx2mid)
-        return torch.LongTensor(ow)
-
-    @cached_property
-    def open_world_idxs_val(self) -> torch.LongTensor:
-        ht = self.dataset.validation.mapped_triples[:, (0, 2)]
-        idxs = {v for v in ht.ravel() if v in self.open_world_idxs}
-        return torch.LongTensor(list(idxs))
-
-    @cached_property
-    def open_world_idxs_test(self) -> torch.LongTensor:
-        ht = self.dataset.testing.mapped_triples[:, (0, 2)]
-        idxs = {v for v in ht.ravel() if v in self.open_world_idxs}
-        return torch.LongTensor(list(idxs))
-
-    def __init__(self, irt2: IRT2, config):
-        self.config = config
-
-        assert len(config["kgc"]) == 1
-        self.name, path = list(config["kgc"].items())[0]
-        self.path = kpath(path, is_dir=True)
-
-        log.info(f"loading >[{self.name}]< kgc model from {path}")
-
-        with kpath(self.path / "config.yaml", is_file=True).open(mode="r") as fd:
-            self.config = yaml.safe_load(fd)
-
-        model = kpath(self.path / "pipeline" / "trained_model.pkl", is_file=True)
-        self.model = torch.load(model)
-
-        self.mid2idx, self.dataset = data.create_ow_pykeen_dataset(irt2)
-
-    # index mapping: convert between indexes and vid, mid
-
-    def idx2key(
-        self,
-        idx: IDX,
-    ) -> tuple[Literal["mid", "vid"], Union[VID, MID]]:
-        # if it can be found in the KGC.idx2mid mapping
-        # it was a former MID and a VID otherwise
-
-        try:
-            mid = self.kgc.idx2mid[idx]
-            return "mid", mid
-        except KeyError:
-            return "vid", idx
-
-    def key2idx(
-        self,
-        kind: Literal["mid", "vid"],
-        key: Union[VID, MID],
-    ) -> IDX:
-        assert kind in {"mid", "vid"}
-        if kind == "mid":
-            return self.mid2idx[key]
-        if kind == "vid":
-            return key
-
-
 class Evaluation(enum.Enum):
 
     # original closed world
@@ -303,7 +117,7 @@ class Evaluation(enum.Enum):
 class Projector(Base):
 
     # see __init__
-    kgc: KGC
+    kgc: data.KGC
     irt2: IRT2
     evaluations: set[Evaluation]
 
@@ -371,21 +185,21 @@ class Projector(Base):
 
     def _log_projection_stats(self):
         def _perc(f):
-            return f"{f * 100:2.2f}%"
+            return f"{round(f * 100)}%"
 
         def _stats(which, idxs):
             projections = self.projections_counts[idxs]
 
             mask = projections != 0
             count = mask.sum()
-            total = projections[mask].sum().item()
+            total = int(projections[mask].sum().item())
             ratio = count / total
             perc = _perc(count / len(idxs))
 
             log.info(
                 f" >[{which} projections]< "
                 f" {count}/{len(idxs)} ({perc}) items"
-                f" with {total} projections ({ratio=:2.3f})"
+                f" with {total} projections ({ratio=:.2f})"
             )
 
         _stats("transductive", self.kgc.closed_world_idxs)
@@ -393,7 +207,7 @@ class Projector(Base):
         _stats("test", self.kgc.open_world_idxs_test)
 
     def gather_projections(self):
-        if self.global_step == 0:
+        if not self.training or self.global_step == 0:
             log.info("skipping projection gathering (not trained yet)!")
             self.clear_projections()
             self._gathered_projections = True
@@ -564,7 +378,7 @@ class Projector(Base):
             "hits@10": results.get_metric("both.realistic.hits_at_10"),
         }
 
-        # can not use this because than checkpointing does not work
+        # can not use this because then checkpointing does not work
         # (self.logger may be None if fast_dev_run)
         # if self.logger is not None:
         #     self.logger.log_metrics(
@@ -600,17 +414,13 @@ class Projector(Base):
         super().__init__(config, *args, **kwargs)
 
         self.irt2 = irt2
-        self.kgc = KGC(irt2, config)
+        self.kgc = data.KGC(irt2, config)
         self.kgc.model.cpu()
 
         self.evaluations = {Evaluation(name) for name in config["evaluations"]}
         log.info(f"will run evaluations: {[p.value for p in self.evaluations]}")
 
         self._init_projections()
-
-        print("\nCreated PyKEEN Dataset from IRT2:")
-        print(self.kgc.dataset.summary_str())
-        print()
 
     # /properties and initialization
     # ----------------------------------------
@@ -690,6 +500,9 @@ class Projector(Base):
         self.update_projections(projections, reduced_samples)
 
     def on_fit_start(self):
+        print(self.kgc.description)
+        print()
+
         print("\nFITTING\n")
         log.info("starting to fit")
 

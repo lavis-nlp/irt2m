@@ -8,19 +8,21 @@ import random
 import textwrap
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from functools import partial
+from functools import cached_property, partial
 from pathlib import Path
-from typing import ClassVar, Hashable, Literal, Optional
+from typing import ClassVar, Hashable, Literal, Optional, Union
 
 import pykeen as pk
 import pykeen.datasets
+import pykeen.models
 import pykeen.triples
 import pytorch_lightning as pl
 import torch
 import torch.utils.data as td
 import transformers as tf
+import yaml
 from irt2.dataset import IRT2, Context
-from irt2.types import VID
+from irt2.types import MID, VID
 from ktz.filesystem import path as kpath
 from ktz.string import args_hash, decode_line, encode_line
 from tabulate import tabulate
@@ -215,6 +217,221 @@ def create_ow_pykeen_dataset(irt2) -> pykeen.datasets.Dataset:
     )
 
     return mid2idx, dataset
+
+
+# index internally used to maintain
+# a global, gapless numbering of entitites
+# to be scored by the PyKEEN triple scorers
+IDX = int
+
+
+class KGC:
+    """
+    Maintains a trained PyKEEN 1.8.1 model.
+
+    Some notes regarding embeddings as maintained by PyKEEN:
+
+
+    Data Model
+    ----------
+
+    model = self.model
+
+    model.entity_representations:
+      torch.nn.modules.container.ModuleList
+
+    model.entity_representations[0]:
+      pykeen.nn.representation.Embedding
+
+    model.entity_representations[0]._embeddings:
+      torch.nn.modules.sparse.Embedding
+
+    model.entity_representations[0]._embeddings.weight:
+      torch.nn.parameter.Parameter
+
+
+    Data Types
+    ----------
+
+    Let's see for ComplEx where the complex numbers are:
+
+    idxs = torch.LongTensor([0])
+    f = torch.is_complex
+
+    f(model.entity_representations[0]._embeddings.weight)
+      False
+
+    f(self.model.entity_representations[0]._embeddings(idxs))
+      False
+
+    f(self.model.entity_representations[0](idxs))
+      True
+
+    This is because PyKEEN saves data as real-valued (n, 2*d) sized
+    real embeddings and in the forward method torch.view_as_complex
+    is called (torch.nn.Embedding has no complex number support yet).
+
+    Side note:
+      - view_as_complex: N x D x 2 -> N x D
+      - view_as_real:    N x D -> N x D x 2
+      - PyKEEN seems to encode it as N x 2D where the data is saved
+        with stride; for a complex vector [c_1, c_2, ...] c_1 = r_1 + i * i_1
+        the view_as_real view would be [[r_1, r_2, ...], [i_1, i_2, ...]]
+        and PyKEEN saves it as [r_1, c_1, r_2, c_2, ...]
+
+
+    See also:
+     - https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L353
+     - https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L410
+
+
+    Conclusion
+    ----------
+
+    We can simply access the private _embeddings.weight and leave
+    the interpretation for PyKEEN when scoring as we are only
+    interested in geometric difference (as in norm). And this feature
+    -wise difference allows us to to leave the interpretation opaque.
+
+    """
+
+    name: str
+    path: Path
+
+    config: Config
+    mid2idx: dict[MID, IDX]
+
+    model: pykeen.models.ERModel
+    dataset: pykeen.datasets.Dataset
+
+    @cached_property
+    def idx2mid(self) -> dict[IDX, MID]:
+        return {v: k for k, v in self.mid2idx.items()}
+
+    @cached_property
+    def idx2str(self) -> dict[IDX, str]:
+        return {v: k for k, v in self.dataset.entity_to_id.items()}
+
+    @property
+    def cw_entity_embedding(self) -> pykeen.nn.representation.Embedding:
+        return self.model.entity_representations[0]
+
+    @property
+    def relation_embedding(self) -> pykeen.nn.representation.Embedding:
+        return self.model.relation_representations[0]
+
+    @cached_property
+    def num_embeddings(self):
+        return max(self.dataset.entity_to_id.values()) + 1
+
+    @cached_property
+    def embedding_dim(self) -> int:
+        # this returns 1000 for 500 dimensional complex embeddings
+        return self.cw_entity_embedding.embedding_dim
+
+    @cached_property
+    def closed_world_idxs(self) -> torch.LongTensor:
+        # simply use the available vids
+        # information of dataset.training.entity_ids etc is not usable
+        # because all share the whole entity set
+
+        ht = self.dataset.training.mapped_triples[:, (0, 2)]
+        cw = sorted(set(ht.ravel().tolist()))
+
+        return torch.LongTensor(sorted(cw))
+
+    @cached_property
+    def open_world_idxs(self) -> torch.LongTensor:
+        return torch.LongTensor(sorted(self.idx2mid))
+
+    def _open_world_idxs(
+        self,
+        mapped_triples,
+        filtered: set = None,
+    ) -> torch.LongTensor:
+        ow = set(self.open_world_idxs.tolist())
+        idxs = set(mapped_triples[:, (0, 2)].ravel().tolist())
+
+        idxs = (idxs & ow) - (filtered or set())
+        return torch.LongTensor(sorted(idxs))
+
+    @cached_property
+    def open_world_idxs_val(self) -> torch.LongTensor:
+        mapped_triples = self.dataset.validation.mapped_triples
+        return self._open_world_idxs(mapped_triples)
+
+    @cached_property
+    def open_world_idxs_test(self) -> torch.LongTensor:
+        mapped_triples = self.dataset.testing.mapped_triples
+        return self._open_world_idxs(
+            mapped_triples,
+            filtered=set(self.open_world_idxs_val.tolist()),
+        )
+
+    # --
+
+    @cached_property
+    def description(self) -> str:
+        header = f"KGC: {self.model.interaction}\n"
+
+        counts = [
+            "maintained indexes:",
+            f"     closed world (train): {len(self.closed_world_idxs)}",
+            f"       open world (total): {len(self.open_world_idxs)}",
+            f"  open world (validation): {len(self.open_world_idxs_val)}",
+            f"        open world (test): {len(self.open_world_idxs_test)}",
+        ]
+        counts = "\n".join(counts)
+
+        buf = [
+            self.dataset.summary_str(),
+            counts,
+        ]
+
+        return header + textwrap.indent("\n".join(buf), prefix="  ")
+
+    def __init__(self, irt2: IRT2, config):
+        self.config = config
+
+        assert len(config["kgc"]) == 1
+        self.name, path = list(config["kgc"].items())[0]
+        self.path = kpath(path, is_dir=True)
+
+        log.info(f"loading >[{self.name}]< kgc model from {path}")
+
+        with kpath(self.path / "config.yaml", is_file=True).open(mode="r") as fd:
+            self.config = yaml.safe_load(fd)
+
+        model = kpath(self.path / "pipeline" / "trained_model.pkl", is_file=True)
+        self.model = torch.load(model)
+
+        self.mid2idx, self.dataset = create_ow_pykeen_dataset(irt2)
+
+    # index mapping: convert between indexes and vid, mid
+
+    def idx2key(
+        self,
+        idx: IDX,
+    ) -> tuple[Literal["mid", "vid"], Union[VID, MID]]:
+        # if it can be found in the KGC.idx2mid mapping
+        # it was a former MID and a VID otherwise
+
+        try:
+            mid = self.idx2mid[idx]
+            return "mid", mid
+        except KeyError:
+            return "vid", idx
+
+    def key2idx(
+        self,
+        kind: Literal["mid", "vid"],
+        key: Union[VID, MID],
+    ) -> IDX:
+        assert kind in {"mid", "vid"}
+        if kind == "mid":
+            return self.mid2idx[key]
+        if kind == "vid":
+            return key
 
 
 def load_tokenizer(
@@ -576,11 +793,14 @@ class RingDataset(td.Dataset):
         seed: int = None,
         contexts_per_sample: int = None,
         max_contexts_per_sample: Optional[int] = None,
+        keep: set[int] = None,
     ):
         assert seed is not None, "fixed seed is required"
 
         super().__init__()
         log.info(f"initializing >[{kind}]< ringbuffer dataset ({seed=})")
+        if keep:
+            log.info(f"get a keeplist with {len(keep)} keys")
 
         self.seed = seed
         self.kind = kind
@@ -601,7 +821,11 @@ class RingDataset(td.Dataset):
             test=irt2.open_contexts_test,
         )[kind]
 
-        rings, stats = self._cached_init(Contexts)
+        _rings, stats = self._cached_init(Contexts)
+
+        # removing filtered samples
+        rings = {k: v for k, v in _rings.items() if not keep or k in keep}
+        log.info(f"removed {len(_rings) - len(rings)} keys due to filterlist")
 
         # register data
 
@@ -903,12 +1127,25 @@ class ProjectorModule(pl.LightningDataModule):
 
         modconf = self.config["module"]
 
+        if hasattr(self, "trainer"):
+            kgc = self.trainer.model.kgc
+
+            def _get(idx):
+                return kgc.idx2key(idx)[1]
+
+            keep_train = set(map(_get, kgc.closed_world_idxs.tolist()))
+            keep_valid = set(map(_get, kgc.open_world_idxs_val.tolist()))
+        else:
+            keep_train = None
+            keep_valid = None
+
         TrainDataset = PROJECTOR_DATASETS[modconf["train_ds"]]
         self.train_ds = TrainDataset(
             irt2=self.irt2,
             tokenizer=self.tokenizer,
             config=self.config,
             kind="train",
+            keep=keep_train,
             **modconf["train_ds_kwargs"],
         )
 
@@ -920,6 +1157,7 @@ class ProjectorModule(pl.LightningDataModule):
             tokenizer=self.tokenizer,
             config=self.config,
             kind="valid",
+            keep=keep_valid,
             **modconf["valid_ds_kwargs"],
         )
 

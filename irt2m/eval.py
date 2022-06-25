@@ -3,6 +3,7 @@
 
 import csv
 import logging
+import pickle
 import re
 import textwrap
 from datetime import datetime
@@ -11,9 +12,9 @@ from pathlib import Path
 from typing import Optional
 
 import torch
+import torch.utils.data as td
 import yaml
 from irt2.dataset import IRT2
-from ktz.collections import dmerge
 from ktz.filesystem import path as kpath
 from tabulate import tabulate
 from tqdm import tqdm as _tqdm
@@ -142,58 +143,114 @@ class ProjectorResult:
         return irt2, module, model
 
 
-def batcher(loader, module, device):
-    for batch in loader:
-        yield module.transfer_batch_to_device(batch, device, 0)
+def create_projections(
+    config,
+    irt2,
+    model,
+    module,
+    device,
+    batch_size,
+):
+    ds_kwargs = config["module"]["valid_ds_kwargs"]
+    print(">> dataset: ", ds_kwargs)
 
+    dl_kwargs = config["module"]["valid_loader_kwargs"]
+    dl_kwargs |= dict(shuffle=False, batch_size=batch_size)
+    print(">> dataloader:", dl_kwargs)
 
-def tqdm_batcher(gen, loader, desc):
-    yield from tqdm(
-        gen,
-        desc=desc,
-        unit=" batches",
-        total=len(loader),
-    )
+    loaders = {
+        "closed-world (train)": td.DataLoader(
+            data.VertexFlatDataset(
+                irt2=irt2,
+                tokenizer=module.tokenizer,
+                config=config,
+                kind="train",
+                **ds_kwargs,
+            ),
+            collate_fn=data.VertexFlatDataset.collate_fn,
+            **dl_kwargs,
+        ),
+        "open-world (validation)": td.DataLoader(
+            data.MentionFlatDataset(
+                irt2=irt2,
+                tokenizer=module.tokenizer,
+                config=config,
+                kind="valid",
+                **ds_kwargs,
+            ),
+            collate_fn=data.VertexFlatDataset.collate_fn,
+            **dl_kwargs,
+        ),
+        "open-world (test)": td.DataLoader(
+            data.VertexFlatDataset(
+                irt2=irt2,
+                tokenizer=module.tokenizer,
+                config=config,
+                kind="test",
+                **ds_kwargs,
+            ),
+            collate_fn=data.VertexFlatDataset.collate_fn,
+            **dl_kwargs,
+        ),
+    }
 
-
-def create_projections(model, module, device):
     with torch.no_grad():
         model = model.to(device=device)
-        model.clear_projections()  # paranoid
 
-        # --
+        model.clear_projections()
 
-        print("\nCreate closed-world projections")
-        loader = module.train_dataloader()
+        for name, loader in loaders.items():
+            gen = tqdm(
+                loader,
+                desc=f"{name}",
+                unit=" batches",
+                total=len(loader),
+            )
 
-        breakpoint()
+            print(f"\n{loader.dataset.description}\n\n")
 
-        gen = tqdm_batcher(
-            gen=batcher(loader, module, device),
-            loader=loader,
-            desc="closed-world (train)",
-        )
-
-        for batch in gen:
-            result = model.forward(batch)
-            model.update_projections(*result)
-
-        # --
-
-        print("\nCreate open-world projections (validation)")
-        loader = module.val_dataloader()
-
-        gen = tqdm_batcher(
-            gen=batcher(loader, module, device),
-            loader=loader,
-            desc="open-world (validation)",
-        )
-
-        for batch in gen:
-            result = model.forward(batch)
-            model.update_projections(*result)
+            for batch in gen:
+                batch = module.transfer_batch_to_device(batch, device, 0)
+                result = model.forward(batch)
+                model.update_projections(*result)
 
         model.gather_projections()
+    return model.projections, model.projections_counts
+
+
+def init_projections(
+    source: Path,
+    config,
+    irt2,
+    model,
+    module,
+    device,
+    batch_size,
+):
+    cache = kpath(source / "cache", create=True) / "projections.pkl"
+    if cache.exists():
+        print("loading projections from cache")
+
+        with cache.open(mode="rb") as fd:
+            P, PC = pickle.load(fd)
+
+        model.projections = P
+        model.projections_counts = PC
+
+    else:
+        print("cache miss! creating projections from text")
+
+        P, PC = create_projections(
+            config,
+            irt2,
+            model,
+            module,
+            device,
+            batch_size,
+        )
+
+        with cache.open(mode="wb") as fd:
+            pickle.dump((P, PC), fd)
 
 
 def projector(
@@ -219,49 +276,26 @@ def projector(
     # initialize model and data
 
     irt2, module, model = result.load(checkpoint)
+    model.eval()
+    assert not model.training
+
     device = torch.device("cuda")
-
-    # TODO cache projections
-
-    # valid_ds: mention flat
-    # valid_ds_kwargs:
-    #   seed: 5012022
-    #   max_contexts_per_sample: 1000
-    # valid_loader_kwargs:
-    #   shuffle: false
-    #   batch_size: 30
-
-    # create flat datasets to iterate all text contexts
-
     if batch_size is None:
         batch_size = result.config["module"]["valid_loader_kwargs"]["batch_size"]
 
-    modconf = dict(
-        module=dict(
-            train_ds="mention flat",
-            train_loader_kwargs=dict(batch_size=batch_size),
-            valid_ds="mention flat",
-            valid_loader_kwargs=dict(batch_size=batch_size),
-        )
+    # module.setup("evaluation")
+
+    init_projections(
+        source,
+        result.config,
+        irt2,
+        model,
+        module,
+        device,
+        batch_size,
     )
-
-    module = data.ProjectorModule(
-        module.irt2,
-        config=dmerge(result.config, modconf),
-    )
-
-    module.setup("evaluation")
-    create_projections(model, module, device)
-
-    breakpoint()
 
     # run evaluations
-
-    # loader = (
-    #     module.train_dataloader(),
-    #     module.validation_dataloader(),
-    #     # module.test_dataloader(),
-    # )
 
     # for batch in batcher(loader, device=):
     #     projections, reduced_samples = self.forward(batch)
