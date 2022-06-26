@@ -294,8 +294,6 @@ class KGCModel:
 
 class Projector(Base):
 
-    pooling: Literal["mean", "max"]
-
     # see __init__
     irt2: IRT2
 
@@ -415,17 +413,8 @@ class Projector(Base):
         idxs = [self.kgc.key2idx(s.keyname, s.key) for s in samples]
 
         for v, idx in zip(projected.detach(), idxs):
-
-            if self.pooling == "mean":
-                self.projections[idx] += v
-                self.projections_counts[idx] += 1
-
-            elif self.pooling == "max":
-                self.projections[idx] = torch.max(self.projections[idx], v)
-                self.projections_counts[idx] = 1
-
-            else:
-                assert f"unknown pooling strategy {self.pooling}"
+            self.projections[idx] += v
+            self.projections_counts[idx] += 1
 
     def projection_error(self):
         assert self._gathered_projections
@@ -521,22 +510,12 @@ class Projector(Base):
     # /kgc model
     # ----------------------------------------
 
-    def __init__(
-        self,
-        irt2: IRT2,
-        config: dict,
-        *args,
-        pooling: str = "mean",
-        **kwargs,
-    ):
+    def __init__(self, irt2: IRT2, config: dict, *args, **kwargs):
         super().__init__(config, *args, **kwargs)
 
         self.irt2 = irt2
         self.kgc = data.KGC(irt2)
         self.kgc_model = KGCModel(config)
-
-        self.pooling = pooling
-        log.info(f"projections will be >[{self.pooling}-pooled]<")
 
         self.evaluations = {Evaluation(name) for name in config["evaluations"]}
         log.info(f"will run evaluations: {[p.value for p in self.evaluations]}")
@@ -741,8 +720,14 @@ class SingleAffineProjector(Projector):
 
 
 class MultiAffineProjector(Projector):
+
+    pooling: Literal["mean", "max"]
+
     def __init__(self, *args, pooling: str = "mean", **kwargs):
         super().__init__(*args, pooling=pooling, **kwargs)
+
+        self.pooling = pooling
+        log.info(f"aggregations will be >[{self.pooling}-pooled]<")
 
         self.loss = torch.nn.MSELoss()
         self.projector = torch.nn.Linear(
