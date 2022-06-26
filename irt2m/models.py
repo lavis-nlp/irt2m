@@ -6,6 +6,7 @@ import logging
 import sys
 from contextlib import contextmanager
 from itertools import count, groupby, zip_longest
+from pathlib import Path
 from typing import Literal
 
 import pykeen.datasets
@@ -37,6 +38,21 @@ OPTIMIZER = {
 
 
 # --
+
+
+class Evaluation(enum.Enum):
+
+    # original closed world
+    kgc_train = "kgc/train"
+
+    # projected closed world
+    kgc_transductive = "kgc/transductive"
+
+    # projected open world (validation split)
+    kgc_inductive = "kgc/inductive"
+
+    # projected open world (test split)
+    kgc_test = "kgc/test"
 
 
 # not using abc to avoid multi-inheritance
@@ -96,23 +112,184 @@ class Base(pl.LightningModule):
     def forward(self, batch):
         raise NotImplementedError()
 
+    # kgc
+
+    def run_kgc_evaluation(self, which: Evaluation) -> dict:
+        # print(f"\n\n\nevaluate {which.value} {datetime.now()}\n")
+        # log.info(f"running >[{which.value}]< evaluation")
+
+        evaluator = pykeen.evaluation.RankBasedEvaluator(filtered=True)
+        dataset = self.kgc.dataset
+
+        if which in {
+            Evaluation.kgc_transductive,
+            Evaluation.kgc_inductive,
+            Evaluation.kgc_test,
+        }:
+            assert self._gathered_projections
+
+        kwargs = {
+            Evaluation.kgc_train: dict(
+                mapped_triples=dataset.training.mapped_triples,
+                additional_filter_triples=[
+                    dataset.training.mapped_triples,
+                ],
+            ),
+            Evaluation.kgc_transductive: dict(
+                mapped_triples=dataset.training.mapped_triples,
+                additional_filter_triples=[
+                    dataset.training.mapped_triples,
+                ],
+            ),
+            Evaluation.kgc_inductive: dict(
+                mapped_triples=dataset.validation.mapped_triples,
+                additional_filter_triples=[
+                    dataset.training.mapped_triples,
+                ],
+            ),
+            Evaluation.kgc_test: dict(
+                mapped_triples=dataset.testing.mapped_triples,
+                additional_filter_triples={
+                    dataset.training.mapped_triples,
+                    dataset.validation.mapped_triples,
+                },
+            ),
+        }[which]
+
+        if self.debug:
+            # choice arbitrary
+            log.info("debug mode: reducing mapped triples for scoring")
+            kwargs["mapped_triples"] = kwargs["mapped_triples"][:100]
+
+        model = self.kgc_model.model.to(device=self.device)
+        with self.replace_embeddings(which):
+            results = evaluator.evaluate(
+                model=model,
+                tqdm_kwargs=dict(
+                    leave=False,
+                    ncols=data.TERM_WIDTH,
+                    file=sys.stdout,
+                ),
+                **kwargs,
+            )
+
+        # self.kgc_model = self.kgc_model.cpu()
+        return results
+
+    def _log_kgc_results(self, which: Evaluation, results):
+        metrics = {
+            "hits@1": results.get_metric("both.realistic.hits_at_1"),
+            "hits@5": results.get_metric("both.realistic.hits_at_5"),
+            "hits@10": results.get_metric("both.realistic.hits_at_10"),
+        }
+
+        self.log_dict({f"{which.value}/{key}": val for key, val in metrics.items()})
+
+        realistic = results.to_dict()["both"]["realistic"]
+        log.info(f"{which.value}: >[{realistic['hits_at_10'] * 100:2.3f}]< h@10")
+
+        if not self.debug:
+
+            fname = (
+                f"epoch={self.current_epoch}"
+                f"-step={self.global_step}"
+                f"_{which.value.split('/')[1]}"
+                ".yaml"
+            )
+
+            path = kpath(self.config["out"], is_dir=True)
+            path = kpath(path / "kgc", create=True)
+
+            with (path / fname).open(mode="w") as fd:
+                fd.write(yaml.safe_dump(results.to_dict()))
+
 
 # --- OPEN WORLD PROJECTOR TRAINING
 
 
-class Evaluation(enum.Enum):
+class KGCModel:
+    """
+    Maintains a trained PyKEEN 1.8.1 model.
 
-    # original closed world
-    kgc_train = "kgc/train"
+    Some notes regarding embeddings as maintained by PyKEEN:
 
-    # projected closed world
-    kgc_transductive = "kgc/transductive"
+    Data Model
+    ----------
 
-    # projected open world (validation split)
-    kgc_inductive = "kgc/inductive"
+    model = self.kgc_model
 
-    # projected open world (test split)
-    kgc_test = "kgc/test"
+    model.entity_representations:
+      torch.nn.modules.container.ModuleList
+
+    model.entity_representations[0]:
+      pykeen.nn.representation.Embedding
+
+    model.entity_representations[0]._embeddings:
+      torch.nn.modules.sparse.Embedding
+
+    model.entity_representations[0]._embeddings.weight:
+      torch.nn.parameter.Parameter
+
+
+    Data Types
+    ----------
+
+    Let's see for ComplEx where the complex numbers are:
+
+    idxs = torch.LongTensor([0])
+    f = torch.is_complex
+
+    f(model.entity_representations[0]._embeddings.weight)
+      False
+
+    f(self.model.entity_representations[0]._embeddings(idxs))
+      False
+
+    f(self.model.entity_representations[0](idxs))
+      True
+
+    This is because PyKEEN saves data as real-valued (n, 2*d) sized
+    real embeddings and in the forward method torch.view_as_complex
+    is called (torch.nn.Embedding has no complex number support yet).
+
+    Side note:
+      - view_as_complex: N x D x 2 -> N x D
+      - view_as_real:    N x D -> N x D x 2
+      - PyKEEN seems to encode it as N x 2D where the data is saved
+        with stride; for a complex vector [c_1, c_2, ...] c_1 = r_1 + i * i_1
+        the view_as_real view would be [[r_1, r_2, ...], [i_1, i_2, ...]]
+        and PyKEEN saves it as [r_1, c_1, r_2, c_2, ...]
+
+    See also:
+     - https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L353
+     - https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L410
+
+
+    Conclusion
+    ----------
+
+    We can simply access the private _embeddings.weight and leave
+    the interpretation for PyKEEN when scoring as we are only
+    interested in geometric difference (as in norm). And this feature
+    -wise difference allows us to to leave the interpretation opaque.
+    """
+
+    config: dict
+    path: Path
+    model: pykeen.models.ERModel
+
+    def __init__(self, config):
+        assert len(config["kgc"]) == 1
+        self.name, path = list(config["kgc"].items())[0]
+        self.path = kpath(path, is_dir=True)
+
+        log.info(f"loading >[{self.name}]< kgc model from {path}")
+
+        with kpath(self.path / "config.yaml", is_file=True).open(mode="r") as fd:
+            self.config = yaml.safe_load(fd)
+
+        model = kpath(self.path / "pipeline" / "trained_model.pkl", is_file=True)
+        self.model = torch.load(model)
 
 
 class Projector(Base):
@@ -120,8 +297,11 @@ class Projector(Base):
     pooling: Literal["mean", "max"]
 
     # see __init__
-    kgc: data.KGC
     irt2: IRT2
+
+    kgc: data.KGC
+    kgc_model: KGCModel
+
     evaluations: set[Evaluation]
 
     # see _init_projections
@@ -142,7 +322,7 @@ class Projector(Base):
 
     def _init_projections(self):
         # init reference embedding
-        self.targets = self.kgc.cw_entity_embedding._embeddings.weight.detach()
+        self.targets = self.cw_entity_embedding._embeddings.weight.detach()
         self.targets = self.targets.to(device=self.device)
 
         # we require real embeddings for norm/euclidean operations
@@ -289,10 +469,10 @@ class Projector(Base):
 
     @contextmanager
     def replace_embeddings(self, which: Evaluation):
-        old = self.kgc.cw_entity_embedding
+        old = self.cw_entity_embedding
 
         # https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/models/unimodal/complex.py#L102
-        new = self.kgc.cw_entity_embedding.__class__(
+        new = self.cw_entity_embedding.__class__(
             max_id=self.kgc.num_embeddings,
             shape=old.shape,
             # https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/models/unimodal/complex.py#L106
@@ -308,7 +488,7 @@ class Projector(Base):
         if which is not Evaluation.kgc_train:
             self._overwrite_embedding(which, new)
 
-        self.kgc.model.entity_representations[0] = new
+        self.kgc_model.model.entity_representations[0] = new
 
         try:
             yield
@@ -318,110 +498,28 @@ class Projector(Base):
 
         finally:
             log.info("restoring original kgc model")
-            self.kgc.model.entity_representations[0] = old
+            self.kgc_model.model.entity_representations[0] = old
 
     # /kgc embedding shenanigans
-
-    def run_kgc_evaluation(self, which: Evaluation) -> dict:
-        # print(f"\n\n\nevaluate {which.value} {datetime.now()}\n")
-        # log.info(f"running >[{which.value}]< evaluation")
-
-        evaluator = pykeen.evaluation.RankBasedEvaluator(filtered=True)
-        dataset = self.kgc.dataset
-
-        if which in {
-            Evaluation.kgc_transductive,
-            Evaluation.kgc_inductive,
-            Evaluation.kgc_test,
-        }:
-            assert self._gathered_projections
-
-        kwargs = {
-            Evaluation.kgc_train: dict(
-                mapped_triples=dataset.training.mapped_triples,
-                additional_filter_triples=[
-                    dataset.training.mapped_triples,
-                ],
-            ),
-            Evaluation.kgc_transductive: dict(
-                mapped_triples=dataset.training.mapped_triples,
-                additional_filter_triples=[
-                    dataset.training.mapped_triples,
-                ],
-            ),
-            Evaluation.kgc_inductive: dict(
-                mapped_triples=dataset.validation.mapped_triples,
-                additional_filter_triples=[
-                    dataset.training.mapped_triples,
-                ],
-            ),
-            Evaluation.kgc_test: dict(
-                mapped_triples=dataset.testing.mapped_triples,
-                additional_filter_triples={
-                    dataset.training.mapped_triples,
-                    dataset.validation.mapped_triples,
-                },
-            ),
-        }[which]
-
-        if self.debug:
-            # choice arbitrary
-            log.info("debug mode: reducing mapped triples for scoring")
-            kwargs["mapped_triples"] = kwargs["mapped_triples"][:100]
-
-        self.kgc.model = self.kgc.model.to(device=self.device)
-        with self.replace_embeddings(which):
-            results = evaluator.evaluate(
-                model=self.kgc.model,
-                tqdm_kwargs=dict(
-                    leave=False,
-                    ncols=data.TERM_WIDTH,
-                    file=sys.stdout,
-                ),
-                **kwargs,
-            )
-
-        self.kgc.model = self.kgc.model.cpu()
-        return results
-
-    def _log_kgc_results(self, which: Evaluation, results):
-        metrics = {
-            "hits@1": results.get_metric("both.realistic.hits_at_1"),
-            "hits@5": results.get_metric("both.realistic.hits_at_5"),
-            "hits@10": results.get_metric("both.realistic.hits_at_10"),
-        }
-
-        # can not use this because then checkpointing does not work
-        # (self.logger may be None if fast_dev_run)
-        # if self.logger is not None:
-        #     self.logger.log_metrics(
-        #         {f"{which.value}/{key}": val for key, val in metrics.items()},
-        #         self.current_epoch,
-        #     )
-
-        self.log_dict({f"{which.value}/{key}": val for key, val in metrics.items()})
-
-        realistic = results.to_dict()["both"]["realistic"]
-        log.info(f"{which.value}: >[{realistic['hits_at_10'] * 100:2.3f}]< h@10")
-
-        if not self.debug:
-
-            fname = (
-                f"epoch={self.current_epoch}"
-                f"-step={self.global_step}"
-                f"_{which.value.split('/')[1]}"
-                ".yaml"
-            )
-
-            path = kpath(self.config["out"], is_dir=True)
-            path = kpath(path / "kgc", create=True)
-
-            with (path / fname).open(mode="w") as fd:
-                fd.write(yaml.safe_dump(results.to_dict()))
-
     # /projection management
     # ----------------------------------------
-    # properties and initialization
+    # kgc model
+
+    @property
+    def kgc_embedding_dim(self) -> int:
+        # this returns 1000 for 500 dimensional complex embeddings
+        return self.cw_entity_embedding.embedding_dim
+
+    @property
+    def cw_entity_embedding(self) -> pykeen.nn.representation.Embedding:
+        return self.kgc_model.model.entity_representations[0]
+
+    @property
+    def relation_embedding(self) -> pykeen.nn.representation.Embedding:
+        return self.kgc_model.model.relation_representations[0]
+
+    # /kgc model
+    # ----------------------------------------
 
     def __init__(
         self,
@@ -434,8 +532,8 @@ class Projector(Base):
         super().__init__(config, *args, **kwargs)
 
         self.irt2 = irt2
-        self.kgc = data.KGC(irt2, config)
-        self.kgc.model.cpu()
+        self.kgc = data.KGC(irt2)
+        self.kgc_model = KGCModel(config)
 
         self.pooling = pooling
         log.info(f"projections will be >[{self.pooling}-pooled]<")
@@ -445,7 +543,6 @@ class Projector(Base):
 
         self._init_projections()
 
-    # /properties and initialization
     # ----------------------------------------
     # lightning callbacks and training
 
@@ -626,7 +723,7 @@ class SingleAffineProjector(Projector):
 
         self.projector = torch.nn.Linear(
             self.encoder.config.hidden_size,
-            self.kgc.embedding_dim,
+            self.kgc_embedding_dim,
         )
 
     def aggregate(self, encoded):
@@ -650,7 +747,7 @@ class MultiAffineProjector(Projector):
         self.loss = torch.nn.MSELoss()
         self.projector = torch.nn.Linear(
             self.encoder.config.hidden_size,
-            self.kgc.embedding_dim,
+            self.kgc_embedding_dim,
         )
 
     def aggregate(self, encoded):
