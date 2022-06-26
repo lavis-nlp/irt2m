@@ -389,9 +389,9 @@ class Projector(Base):
         _stats("inductive", self.kgc.open_world_idxs_val)
         _stats("test", self.kgc.open_world_idxs_test)
 
-    def gather_projections(self):
-        if self.global_step == 0:
-            log.info("skipping projection gathering (not trained yet)!")
+    def gather_projections(self, force: bool = False):
+        if not force and self.global_step == 0:
+            log.warning("skipping projection gathering (not trained yet)!")
             self.clear_projections()
             self._gathered_projections = True
             return

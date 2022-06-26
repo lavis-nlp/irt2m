@@ -182,7 +182,7 @@ def create_projections(
             **dl_kwargs,
         ),
         "open-world (test)": td.DataLoader(
-            data.VertexFlatDataset(
+            data.MentionFlatDataset(
                 irt2=irt2,
                 tokenizer=module.tokenizer,
                 config=config,
@@ -214,7 +214,7 @@ def create_projections(
                 result = model.forward(batch)
                 model.update_projections(*result)
 
-        model.gather_projections()
+        model.gather_projections(force=True)
     return model.projections, model.projections_counts
 
 
@@ -251,6 +251,9 @@ def init_projections(
 
         with cache.open(mode="wb") as fd:
             pickle.dump((P, PC), fd)
+
+    mask = PC != 0
+    print(f"obtained {mask.sum().item()} projections: {P.shape}")
 
 
 def projector(
