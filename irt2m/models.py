@@ -6,6 +6,7 @@ import logging
 import sys
 from contextlib import contextmanager
 from itertools import count, groupby, zip_longest
+from typing import Literal
 
 import pykeen.datasets
 import pykeen.evaluation
@@ -115,6 +116,8 @@ class Evaluation(enum.Enum):
 
 
 class Projector(Base):
+
+    pooling: Literal["mean", "max"]
 
     # see __init__
     kgc: data.KGC
@@ -230,9 +233,19 @@ class Projector(Base):
         assert len(samples) == projected.shape[0]
 
         idxs = [self.kgc.key2idx(s.keyname, s.key) for s in samples]
+
         for v, idx in zip(projected.detach(), idxs):
-            self.projections[idx] += v
-            self.projections_counts[idx] += 1
+
+            if self.pooling == "mean":
+                self.projections[idx] += v
+                self.projections_counts[idx] += 1
+
+            elif self.pooling == "max":
+                self.projections[idx] = torch.max(self.projections[idx], v)
+                self.projections_counts[idx] = 1
+
+            else:
+                assert f"unknown pooling strategy {self.pooling}"
 
     def projection_error(self):
         assert self._gathered_projections
@@ -410,12 +423,22 @@ class Projector(Base):
     # ----------------------------------------
     # properties and initialization
 
-    def __init__(self, irt2: IRT2, config, *args, **kwargs):
+    def __init__(
+        self,
+        irt2: IRT2,
+        config: dict,
+        *args,
+        pooling: str = "mean",
+        **kwargs,
+    ):
         super().__init__(config, *args, **kwargs)
 
         self.irt2 = irt2
         self.kgc = data.KGC(irt2, config)
         self.kgc.model.cpu()
+
+        self.pooling = pooling
+        log.info(f"projections will be >[{self.pooling}-pooled]<")
 
         self.evaluations = {Evaluation(name) for name in config["evaluations"]}
         log.info(f"will run evaluations: {[p.value for p in self.evaluations]}")
@@ -500,6 +523,7 @@ class Projector(Base):
         self.update_projections(projections, reduced_samples)
 
     def on_fit_start(self):
+        print("\n\n")
         print(self.kgc.description)
         print()
 
@@ -620,8 +644,8 @@ class SingleAffineProjector(Projector):
 
 
 class MultiAffineProjector(Projector):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, *args, pooling: str = "mean", **kwargs):
+        super().__init__(*args, pooling=pooling, **kwargs)
 
         self.loss = torch.nn.MSELoss()
         self.projector = torch.nn.Linear(
@@ -631,6 +655,16 @@ class MultiAffineProjector(Projector):
 
     def aggregate(self, encoded):
         return encoded[:, 0]
+
+    def pool(self, T):  # B x D -> D
+        if self.pooling == "max":
+            return T.max(axis=0).values
+
+        elif self.pooling == "mean":
+            return T.mean(axis=0)
+
+        else:
+            assert False, f"unknown pooling strategy {self.pooling}"
 
     def reduce(self, aggregated, samples):
         # inner-batch indexes
@@ -647,7 +681,7 @@ class MultiAffineProjector(Projector):
         ]
 
         # batch x kge_dims -> unique entities x kge_dims
-        pooled = [aggregated[idxs].max(axis=0).values for _, idxs in grouped]
+        pooled = [self.pool(aggregated[idxs]) for _, idxs in grouped]
         pooled = torch.vstack(pooled)
 
         unique_keys = tuple(zip(*grouped))[0]

@@ -438,7 +438,14 @@ def projector(config: list[str]):
 
     datamodule = data.ProjectorModule(irt2, config)
     Projector = MODELS[config["model"]]
-    model = Projector(irt2, config, datamodule.tokenizer)
+
+    model = Projector(
+        irt2,
+        config,
+        datamodule.tokenizer,
+        **(config["model_kwargs"] or {}),
+    )
+
     logger = None if debug else _init_logger(config, debug)
 
     # configure
