@@ -38,10 +38,6 @@ REG = {
         prefix="PMA",
         tags=["multi", "projector"],
     ),
-    "single context complex joint": dict(
-        prefix="SJC",
-        tags=["single", "joint"],
-    ),
 }
 
 assert set(REG) == set(MODELS), "missing registry information"
