@@ -115,6 +115,8 @@ class Base(pl.LightningModule):
     # kgc
 
     def run_kgc_evaluation(self, which: Evaluation) -> dict:
+        self.targets = self.targets.to(device=self.device)
+
         # print(f"\n\n\nevaluate {which.value} {datetime.now()}\n")
         # log.info(f"running >[{which.value}]< evaluation")
 
@@ -450,6 +452,9 @@ class Projector(Base):
         if which is Evaluation.kgc_inductive:
             idxs, projections = ow_idxs, self.projections
 
+        if which is Evaluation.kgc_test:
+            idxs, projections = ow_idxs, self.projections
+
         # pykeen directly modifies the _embedding.weight.data
         # https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L395
 
@@ -605,8 +610,6 @@ class Projector(Base):
 
         print("\nFITTING\n")
         log.info("starting to fit")
-
-        self.targets = self.targets.to(device=self.device)
 
         train = Evaluation.kgc_train
         if train in self.evaluations:
