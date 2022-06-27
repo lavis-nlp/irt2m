@@ -38,6 +38,10 @@ REG = {
         prefix="PMA",
         tags=["multi", "projector"],
     ),
+    "single context complex joint": dict(
+        prefix="SJC",
+        tags=["single", "joint"],
+    ),
 }
 
 assert set(REG) == set(MODELS), "missing registry information"
@@ -409,7 +413,25 @@ def _init_callbacks(config, debug):
     return callbacks
 
 
-def projector(config: list[str]):
+# see cli.train_projector
+def _overwrite_config(config, **overwrites):
+    mapping = [
+        ("max_contexts_per_sample", "module.train_ds_kwargs.max_contexts_per_sample"),
+        ("masked", "module.train_ds_kwargs.masking"),
+        ("masked", "module.valid_ds_kwargs.masking"),
+        ("epochs", "trainer.max_epochs"),
+    ]
+
+    for key, trail in mapping:
+        if key in overwrites and overwrites[key] is not None:
+
+            opt = data.dotrslv(config, trail, skiplast=1)
+            opt[trail.split(".")[-1]] = overwrites[key]
+
+            log.info(f'overwrite >[{trail}]< with {overwrites[key]}')
+
+
+def projector(config: list[str], **overwrites):
     """Train a projector."""
 
     def config_handler(config, irt2):
@@ -423,6 +445,8 @@ def projector(config: list[str]):
         )
 
     irt2, config = _load_config_and_irt2(config, config_handler)
+    _overwrite_config(config, **overwrites)
+
     debug = config["trainer"]["fast_dev_run"]
     out = kpath(config["out"], create=not debug)
 
@@ -443,7 +467,7 @@ def projector(config: list[str]):
         irt2,
         config,
         datamodule.tokenizer,
-        **(config["model_kwargs"] or {}),
+        **config.get("model_kwargs", {}),
     )
 
     logger = None if debug else _init_logger(config, debug)

@@ -1,0 +1,45 @@
+# use the wandb agent to run the sweep
+# grid search determines best final model configuration
+# goal: best config with largest embedding size (for later projection training)
+name: cde-small complex grid lcwa - 0
+description: Grid search for ComplEx on IRT2/CDE-Small
+project: irt2-kgc
+
+method: grid
+metric:
+  name: validation.both.realistic.hits_at_10
+  goal: maximize
+
+parameters:
+  learning-rate:
+    values:
+    - 1
+    - 0.8
+    - 0.6
+    - 0.4
+    - 0.2
+  embedding-dim:
+    values:
+    - 100
+    - 300
+    - 500
+    - 700
+    - 900
+  regularizer-weight:
+    values:
+    - 1
+    - 0.6
+    - 0.3
+    - 0.1
+    - 0.06
+    - 0.03
+
+program: irt2m
+command:
+  - ${program}
+  - train
+  - kgc
+  - "-c conf/models/kgc/base.yaml"
+  - "-c conf/models/kgc/models/complex-lcwa.yaml"
+  - "-c conf/models/kgc/data/cde-small.yaml"
+  - ${args}

@@ -18,7 +18,6 @@ evaluations:
   - kgc/train         # closed world kgc with original embeddings (run once before training)
   - kgc/transductive  # closed world kgc with projections (irt2.closed_triples)
   - kgc/inductive     # open world kgc with projections (irt2.open_kgc_val*)
-  # - kgc/test          # currently disabled
 
 
 # pytorch lightning
@@ -39,16 +38,12 @@ scheduler_kwargs: {}
 
 trainer:
   gpus: 1
-
-  # 12886 steps = 1 epoch for cde-l
-  # max_steps: 500_000
   max_epochs: 100
 
+  # this is the "debug" flag
+  fast_dev_run: true
   # limit_train_batches: 10
   # limit_val_batches: 10
-
-  # this is the "debug" flag
-  fast_dev_run: false
 
 wandb:
   project: irt2-projector

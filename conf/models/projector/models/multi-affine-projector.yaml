@@ -10,8 +10,8 @@ module:
   train_ds: vertex ringbuffer
   train_ds_kwargs:
     seed: 5012022
-    contexts_per_sample: 10  # per batch
-    max_contexts_per_sample: 1000
+    contexts_per_sample: 50  # per batch
+    max_contexts_per_sample: 500
   train_loader_kwargs:
     shuffle: true
     batch_size: 1
@@ -20,11 +20,11 @@ module:
   valid_ds: mention ringbuffer
   valid_ds_kwargs:
     seed: 5012022
-    contexts_per_sample: 10
-    max_contexts_per_sample: 10
+    contexts_per_sample: 50
+    max_contexts_per_sample: 50
   valid_loader_kwargs:
     shuffle: false
-    batch_size: 3
+    batch_size: 1
 
 # for available optimizers see irt2m.models.OPTIMIZERS
 optimizer: adam

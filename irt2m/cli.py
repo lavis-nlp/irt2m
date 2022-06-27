@@ -99,6 +99,28 @@ def train_kgc(**kwargs):
     required=True,
     help="configuration file",
 )
+# config overwrites
+@click.option(
+    "--epochs",
+    type=int,
+    multiple=False,
+    required=False,
+    help="how many epochs to train",
+)
+@click.option(
+    "--max-contexts-per-sample",
+    type=int,
+    multiple=False,
+    required=False,
+    help="overwrites max contexts per sample for the training dataset",
+)
+@click.option(
+    "--masked",
+    type=bool,  # cannot use is_flag because of wandb sweeps
+    default=None,
+    required=False,
+    help="whether to mask the mention in the text contexts",
+)
 def train_projector(**kwargs):
     """Train a projector that maps text to KGC vertices."""
     train.projector(**kwargs)

@@ -6,7 +6,7 @@ import logging
 import pickle
 import random
 import textwrap
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from functools import cached_property, partial
 from pathlib import Path
@@ -20,7 +20,6 @@ import pytorch_lightning as pl
 import torch
 import torch.utils.data as td
 import transformers as tf
-import yaml
 from irt2.dataset import IRT2, Context
 from irt2.types import MID, VID
 from ktz.filesystem import path as kpath
@@ -39,7 +38,15 @@ tqdm = partial(_tqdm, ncols=TERM_WIDTH)
 Config = dict
 
 
-# --- CLOSED WORLD KGC TRAINING
+def dotrslv(dic, keychain, skiplast: Optional[int] = 0):
+    "foo.bar.baz -> dic['foo']['bar']['baz']"
+
+    try:
+        for key in keychain.split(".")[:-skiplast]:
+            dic = dic[key]
+        return dic
+    except KeyError:
+        return None
 
 
 # TODO use pykeen.datasets.EagerDataset
@@ -364,7 +371,7 @@ def load_tokenizer(
     """
     if path.is_dir():
         log.info(f"loading tokenizer from {path}")
-        tokenizer = tf.BertTokenizer.from_pretrained(str(path))
+        tokenizer = tf.BertTokenizerFast.from_pretrained(str(path))
 
     else:
         log.info("creating new tokenizer")
@@ -460,10 +467,7 @@ class TokenCache:
         tokens = cached / f"rings.{hashv}.txt.gz"
         meta = cached / f"rings.{hashv}.pk"
 
-        self = cls(
-            tokens=tokens,
-            meta=meta,
-        )
+        self = cls(tokens=tokens, meta=meta)
 
         log.info(f"created token cache for {hashv} (exists={self.exists})")
         return self
@@ -528,7 +532,6 @@ class ProjectorSample:
 #  canonical for every other implementation.
 
 
-# not using abc to avoid multi-inheritance
 class RingDataset(td.Dataset):
     """Offer samples and a batch collator."""
 
@@ -562,8 +565,8 @@ class RingDataset(td.Dataset):
 
             for line in gen:
 
-                key, *tokens = line
-                rings[key].append(tuple(tokens))
+                key, mrg0, mrg1, *tokens = line
+                rings[key].append(((mrg0, mrg1), tuple(tokens)))
                 total += 1
 
             assert stats["total"] == total
@@ -571,36 +574,76 @@ class RingDataset(td.Dataset):
         return dict(rings), stats
 
     def _init_from_contexts(self, cache, contexts):
-        stats = {"total": 0, "maxlen": 0, "discarded": 0, "pruned": 0}
+        stats = Counter()
 
-        rings = defaultdict(deque)
+        def _mention_range(context, tokenized):
+            # cannot use context.data.index(context.mention) to access
+            # the tokenized.char_to_token functionality because
+            # islam matches islamic and querying with "islam "
+            # also does not work if theres punctuation etc.
 
-        with TokenCache.Writer(cache) as writer:
+            mention = tuple(self.tokenizer(context.mention)["input_ids"][1:-1])
+            tokens = tokenized["input_ids"]
 
-            gen = self._tqdm(
-                contexts,
-                desc="tokenizing: ",
+            def different(t):
+                return t[0] != t[1]
+
+            # so we need to match a subsequence in a sequence
+            for start in range(len(tokens) - 1):
+                zipped = zip(tokens[start:], mention)
+                if not any(map(different, zipped)):
+                    return start, start + len(mention)
+
+        def _check(context, text_tokens, mention_range):
+            assert mention_range
+            mention = text_tokens[slice(*mention_range)]
+
+            tokens = self.tokenizer.convert_ids_to_tokens(mention)
+            recons = self.tokenizer.convert_tokens_to_string(tokens)
+
+            # e.g. a mention might have "look like-this" which leads
+            # to "look like - this" so we need to tokenize and reassamle
+            # the context mention also
+            ref = self.tokenizer.convert_tokens_to_string(
+                self.tokenizer.convert_ids_to_tokens(
+                    self.tokenizer(context.mention)["input_ids"][1:-1],
+                )
             )
 
+            assert recons == ref, f"{recons} != {ref}"
+
+        rings = defaultdict(deque)
+        with TokenCache.Writer(cache) as writer:
+
+            gen = self._tqdm(contexts, desc="tokenizing: ")
+
             for context in gen:
+                tokenized = self.tokenizer(context.data)
 
-                tokenized = self.tokenizer([context.data])
-                tokenized = tuple(tokenized["input_ids"][0])
+                text_tokens = tuple(tokenized["input_ids"])
+                mention_range = _mention_range(context, tokenized)
 
-                if MAX_SEQ_LEN < len(tokenized):
+                if mention_range is None:
+                    stats["no mention"] += 1
+                    continue
+
+                # paranoid
+                _check(context, text_tokens, mention_range)
+
+                if MAX_SEQ_LEN < len(text_tokens):
                     stats["discarded"] += 1
                     continue
 
                 key = self.create_key(context)
-                rings[key].append(tokenized)
+                rings[key].append((mention_range, text_tokens))
 
-                encoded = self.encode(key, tokenized)
+                encoded = self.encode(key, mention_range, text_tokens)
                 writer.write(encoded)
 
                 stats["maxlen"] = (
                     stats["maxlen"]
-                    if len(tokenized) < stats["maxlen"]
-                    else len(tokenized)
+                    if len(text_tokens) < stats["maxlen"]
+                    else len(text_tokens)
                 )
 
                 stats["total"] += 1
@@ -617,7 +660,7 @@ class RingDataset(td.Dataset):
         total, pruned = 0, 0
 
         for key in rings:
-            ring = sorted(rings[key])
+            ring = sorted(rings[key], key=lambda t: t[1])
             random.shuffle(ring)
 
             if n is not None:
@@ -635,10 +678,10 @@ class RingDataset(td.Dataset):
     def _write_pruned_cache(self, cache, rings, stats):
         log.info("write pruned context cache")
         with TokenCache.Writer(cache) as writer:
-            gen = ((key, toks) for key, ring in rings.items() for toks in ring)
+            gen = ((key, data) for key, ring in rings.items() for data in ring)
 
-            for key, tokenized in gen:
-                encoded = self.encode(key, tokenized)
+            for key, (mention_range, tokens) in gen:
+                encoded = self.encode(key, mention_range, tokens)
                 writer.write(encoded)
 
             writer.write_meta(stats)
@@ -698,20 +741,25 @@ class RingDataset(td.Dataset):
         seed: int = None,
         contexts_per_sample: int = None,
         max_contexts_per_sample: Optional[int] = None,
-        keep: set[int] = None,
+        keep: Optional[set[int]] = None,
+        masking: Optional[bool] = False,
     ):
         assert seed is not None, "fixed seed is required"
 
         super().__init__()
         log.info(f"initializing >[{kind}]< ringbuffer dataset ({seed=})")
         if keep:
-            log.info(f"get a keeplist with {len(keep)} keys")
+            log.info(f"got a keeplist with {len(keep)} keys")
 
         self.seed = seed
         self.kind = kind
         self.irt2 = irt2
         self.contexts_per_sample = contexts_per_sample
         self.max_contexts_per_sample = max_contexts_per_sample
+
+        # masking is applied in __getitem__ to share token caches
+        self.masking = masking
+        log.info(f"contexts will be >[masked: {masking}]<")
 
         # tokenization
 
@@ -745,21 +793,33 @@ class RingDataset(td.Dataset):
         """Get dataset size."""
         return len(self.rings)
 
+    def _mask(self, idxs):
+        (start, end), idxs = idxs
+
+        if not self.masking:
+            return idxs
+
+        mask = self.tokenizer.vocab[self.tokenizer.mask_token]
+        return idxs[:start] + (mask,) + idxs[end:]
+
     def __getitem__(self, i: int) -> ProjectorSample:
         """Retrieve a VID and N associated text contexts."""
         key = self.keys[i]
         ring = self.rings[key]
 
-        indexes = []
-        while len(indexes) < self.contexts_per_sample:
-            indexes.append(ring[0])
+        idxlis = []
+        while len(idxlis) < self.contexts_per_sample:
+            idxs = self._mask(ring[0])
+            idxlis.append(idxs)
             ring.rotate()
 
-        return ProjectorSample(
+        sample = ProjectorSample(
             key=key,
             keyname=self.keyname,
-            indexes=tuple(indexes),
+            indexes=tuple(idxlis),
         )
+
+        return sample
 
     @staticmethod
     def collate_fn(
@@ -777,9 +837,14 @@ class RingDataset(td.Dataset):
 
         return padded, samples
 
-    def encode(self, key: Hashable, tokenized: Indexes) -> bytes:
+    def encode(
+        self,
+        key: Hashable,
+        mention_range: tuple[IDX],
+        tokenized: Indexes,
+    ) -> bytes:
         """Encode a sample to a single line."""
-        return encode_line((key,) + tokenized, sep=" ", fn=str)
+        return encode_line((key,) + mention_range + tokenized, sep=" ", fn=str)
 
     def decode(self, encoded: bytes) -> tuple[Hashable, int, ...]:
         """Decode a single-line sample."""
@@ -797,7 +862,14 @@ class FlatDataset(RingDataset):
         return len(self._flat)
 
     def __getitem__(self, i: int):
-        return self._flat[i]
+        key, idxs = self._flat[i]
+        idxs = self._mask(idxs)
+
+        return ProjectorSample(
+            key=key,
+            keyname=self.keyname,
+            indexes=(idxs,),
+        )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -807,13 +879,7 @@ class FlatDataset(RingDataset):
 
         for key, ring in self.rings.items():
             for indexes in ring:
-                self._flat.append(
-                    ProjectorSample(
-                        key=key,
-                        keyname=self.keyname,
-                        indexes=(tuple(indexes),),
-                    )
-                )
+                self._flat.append((key, (tuple(indexes))))
 
 
 class VertexDataset:
@@ -983,8 +1049,24 @@ class MentionFlatDataset(MentionDataset, FlatDataset):
         return header + body
 
 
+# triples
+
+
+@dataclass(frozen=True)
+class TripleSample(ProjectorSample):
+    pass
+
+
+class VertexTripleRingbuffer(RingDataset):
+    def __init__(self, *args, **kwargs):
+        log.info("create >[vertex triple ringbuffer]< dataset")
+        super().__init__(*args, **kwargs)
+        log.info("created triple dataset with {len(self)} samples")
+
+
 PROJECTOR_DATASETS = {
     "vertex ringbuffer": VertexRingDataset,
+    "vertex triple ringbuffer": VertexTripleRingbuffer,
     "vertex flat": VertexFlatDataset,
     "mention ringbuffer": MentionRingDataset,
     "mention flat": MentionFlatDataset,
