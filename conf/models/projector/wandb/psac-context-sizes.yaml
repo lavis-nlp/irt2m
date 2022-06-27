@@ -32,6 +32,6 @@ command:
   - ${program}
   - train
   - projector
-  - "--config conf/models/projector/base.yaml"
-  - "--config conf/models/projector/models/single-affine-projector.yaml"
+  - --config=conf/models/projector/base.yaml
+  - --config=conf/models/projector/models/single-affine-projector.yaml
   - ${args}

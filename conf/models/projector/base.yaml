@@ -41,7 +41,7 @@ trainer:
   max_epochs: 100
 
   # this is the "debug" flag
-  fast_dev_run: true
+  fast_dev_run: false
   # limit_train_batches: 10
   # limit_val_batches: 10
 
