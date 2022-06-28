@@ -28,7 +28,7 @@ tqdm = partial(_tqdm, ncols=data.TERM_WIDTH)
 
 def hits(dic, k):
     try:
-        return dic["both"]["realistic"][f"hits_at_{k}"] * 100
+        return dic["both"]["realistic"][f"hits_at_{k}"]
     except KeyError:
         return 0.0
 
@@ -117,6 +117,13 @@ class ProjectorResult:
         for glob in path.glob("checkpoints/*ckpt"):
             self.checkpoints.append(glob)
 
+        path_kgc_results = path / "eval" / "kgc_results.yaml"
+        self.kgc_results = {}
+        if path_kgc_results.exists():
+            log.info("found and loading evaluation results")
+            with path_kgc_results.open(mode="r") as fd:
+                self.kgc_results = yaml.safe_load(fd)
+
         log.info(f"loaded {self}")
 
     # ---
@@ -195,8 +202,6 @@ def create_projections(
     }
 
     with torch.no_grad():
-        model = model.to(device=device)
-
         model.clear_projections()
 
         for name, loader in loaders.items():
@@ -227,7 +232,7 @@ def init_projections(
     device,
     batch_size,
 ):
-    cache = kpath(source / "cache", create=True) / "projections.pkl"
+    cache = kpath(source / "eval", create=True) / "projections.pkl"
     if cache.exists():
         print("loading projections from cache")
 
@@ -236,6 +241,8 @@ def init_projections(
 
         model.projections = P
         model.projections_counts = PC
+        model._gathered_projections = True
+        cached = True
 
     else:
         print("cache miss! creating projections from text")
@@ -252,8 +259,43 @@ def init_projections(
         with cache.open(mode="wb") as fd:
             pickle.dump((P, PC), fd)
 
+        cached = False
+
     mask = PC != 0
     print(f"obtained {mask.sum().item()} projections: {P.shape}")
+
+    return cached
+
+
+def run_kgc_evaluation(source, model, force: bool):
+    cache = kpath(source / "eval", create=True) / "kgc_results.yaml"
+
+    if not force and cache.exists():
+        print("loading results from cache")
+
+        with cache.open(mode="r") as fd:
+            results = yaml.safe_load(fd)
+
+        return results
+
+    print("cache miss! running kgc evaluation")
+
+    evaluations = [
+        models.Evaluation.kgc_train,
+        models.Evaluation.kgc_transductive,
+        models.Evaluation.kgc_inductive,
+        models.Evaluation.kgc_test,
+    ]
+
+    results = {}
+    for which in evaluations:
+        res = model.run_kgc_evaluation(which)
+        results[which.value] = res.to_dict()
+
+    with cache.open(mode="w") as fd:
+        yaml.safe_dump(results, fd)
+
+    return results
 
 
 def projector(
@@ -279,16 +321,17 @@ def projector(
     # initialize model and data
 
     irt2, module, model = result.load(checkpoint)
-    model.eval()
-    assert not model.training
-
     device = torch.device("cuda")
+
+    model = model.to(device=device)
+    model.eval()
+
     if batch_size is None:
         batch_size = result.config["module"]["valid_loader_kwargs"]["batch_size"]
 
     # module.setup("evaluation")
 
-    init_projections(
+    cached = init_projections(
         source,
         result.config,
         irt2,
@@ -300,9 +343,31 @@ def projector(
 
     # run evaluations
 
-    # for batch in batcher(loader, device=):
-    #     projections, reduced_samples = self.forward(batch)
-    #     self.update_projections()
+    results = run_kgc_evaluation(
+        source,
+        model,
+        force=not cached,
+    )
+
+    rows = []
+    for which in ["kgc/train", "kgc/transductive", "kgc/inductive", "kgc/test"]:
+        result = results[which]
+        rows.append(
+            (
+                which,
+                data.dotrslv(result, "both.realistic.hits_at_1"),
+                data.dotrslv(result, "both.realistic.hits_at_5"),
+                data.dotrslv(result, "both.realistic.hits_at_10"),
+            )
+        )
+
+    table = tabulate(
+        rows,
+        headers=["", "h@1", "h@5", "h@10"],
+        floatfmt="2.3f",
+    )
+
+    print(textwrap.indent("\n" + table, prefix="  "))
 
 
 def create_report(folder: str):
@@ -311,22 +376,32 @@ def create_report(folder: str):
 
     print(f"loading {len(glob)} results")
 
-    def _rslv(dic, keychain):
-        try:
-            for key in keychain.split("."):
-                dic = dic[key]
-            return dic
-        except KeyError:
-            return None
-
     rows = []
     for source in glob:
+        row = {}
+
         source = kpath(source, is_dir=True)
         result = ProjectorResult(path=source)
 
         print(textwrap.indent(str(result), prefix="  - "))
 
-        row = {
+        if not result.kgc_results:
+            print(f"skipping {source}: not evaluated yet")
+
+        result_row = {
+            "train h@1": "kgc/train.both.realistic.hits_at_1",
+            "train h@10": "kgc/train.both.realistic.hits_at_10",
+            "transductive h@1": "kgc/transductive.both.realistic.hits_at_1",
+            "transductive h@10": "kgc/transductive.both.realistic.hits_at_10",
+            "inductive h@1": "kgc/inductive.both.realistic.hits_at_1",
+            "inductive h@10": "kgc/inductive.both.realistic.hits_at_10",
+            "test h@1": "kgc/test.both.realistic.hits_at_1",
+            "test h@10": "kgc/test.both.realistic.hits_at_10",
+        }
+
+        row |= {k: data.dotrslv(result.kgc_results, v) for k, v in result_row.items()}
+
+        config_row = {
             "prefix": "prefix",
             "date": "timestamp",
             "contexts per sample": "module.train_ds_kwargs.max_contexts_per_sample",
@@ -336,7 +411,7 @@ def create_report(folder: str):
             "epochs": "trainer.max_epochs",
         }
 
-        row = {k: _rslv(result.config, v) for k, v in row.items()}
+        row |= {k: data.dotrslv(result.config, v) for k, v in config_row.items()}
 
         for k in 1, 10:
             for kind in "inductive", "transductive":
@@ -344,10 +419,15 @@ def create_report(folder: str):
 
                 row |= {
                     # f"{kind} epoch": epoch,
-                    f"{kind} h@{k}": hits,
+                    f"training {kind} h@{k}": hits,
                 }
 
-        row |= {"folder": str(source)}
+        # supplemental
+        row |= {
+            "folder": str(source),
+            "evaluated on": datetime.now().isoformat(),
+        }
+
         rows.append(row)
 
     out = folder / "summary.csv"

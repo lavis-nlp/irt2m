@@ -21,7 +21,7 @@ import torch
 import torch.utils.data as td
 import transformers as tf
 from irt2.dataset import IRT2, Context
-from irt2.types import MID, VID
+from irt2.types import MID, RID, VID
 from ktz.filesystem import path as kpath
 from ktz.string import args_hash, decode_line, encode_line
 from tabulate import tabulate
@@ -481,7 +481,11 @@ class ProjectorSample:
 
     indexes: tuple[Indexes]
 
+    # shared and static
+    irt2: ClassVar[IRT2]
     tokenizer: ClassVar[tf.BertTokenizer]
+
+    # --
 
     def __str__(self) -> str:
         return f"Sample {self.keyname}={self.key}: {len(self.indexes)} contexts"
@@ -765,7 +769,9 @@ class RingDataset(td.Dataset):
 
         self.tokenizer = tokenizer
         assert self.tokenizer
-        # makes decoding available for sample objects
+
+        # makes decoding ids and idxs available for sample objects
+        ProjectorSample.irt2 = irt2
         ProjectorSample.tokenizer = self.tokenizer
 
         Contexts = dict(
@@ -802,9 +808,7 @@ class RingDataset(td.Dataset):
         mask = self.tokenizer.vocab[self.tokenizer.mask_token]
         return idxs[:start] + (mask,) + idxs[end:]
 
-    def __getitem__(self, i: int) -> ProjectorSample:
-        """Retrieve a VID and N associated text contexts."""
-        key = self.keys[i]
+    def _get_indexes(self, key):
         ring = self.rings[key]
 
         idxlis = []
@@ -813,10 +817,16 @@ class RingDataset(td.Dataset):
             idxlis.append(idxs)
             ring.rotate()
 
+        return tuple(idxlis)
+
+    def __getitem__(self, i: int) -> ProjectorSample:
+        """Retrieve a VID and N associated text contexts."""
+        key = self.keys[i]
+
         sample = ProjectorSample(
             key=key,
             keyname=self.keyname,
-            indexes=tuple(idxlis),
+            indexes=self._get_indexes(key),
         )
 
         return sample
@@ -835,7 +845,11 @@ class RingDataset(td.Dataset):
             batch_first=True,
         )
 
-        return padded, samples
+        def transfer(collation, device):
+            batch, samples = collation
+            return batch.to(device=device), samples
+
+        return transfer, padded, samples
 
     def encode(
         self,
@@ -946,7 +960,7 @@ class VertexRingDataset(VertexDataset, RingDataset):
             PROJECTOR VERTEX DATASET
 
             Sample {idx}: {self.irt2.vertices[vid]} ({vid=}):
-              Mentions ({max_mentions}/{len(vid2mid[vid])}:
+              Mentions ({max_mentions}/{len(vid2mid[vid])}):
               {mentions}
 
             """
@@ -1054,14 +1068,111 @@ class MentionFlatDataset(MentionDataset, FlatDataset):
 
 @dataclass(frozen=True)
 class TripleSample(ProjectorSample):
-    pass
+
+    # what the indexes represent
+    kind: Literal["head", "tail"]
+
+    ent: VID
+    rel: RID
+
+    def __str__(self) -> str:
+        ent = f"{self.irt2.vertices[self.ent]} (VID={self.ent})"
+        rel = f"{self.irt2.relations[self.rel]} (RID={self.rel})"
+
+        return str(super()) + f"as {self.kind} of {rel} {ent}"
+
+    @cached_property
+    def description(self) -> str:
+        ent = f"{self.irt2.vertices[self.ent]} (VID={self.ent})"
+        rel = f"{self.irt2.relations[self.rel]} (RID={self.rel})"
+        txt = f">[text of {self.key}]<"
+
+        left, right = (txt, ent) if self.kind == "head" else (ent, txt)
+
+        triple = f"\n\nTriple: {left} {rel} {right}\n"
+        return super().description + triple
 
 
-class VertexTripleRingbuffer(RingDataset):
+class VertexTripleRingbuffer(VertexDataset, RingDataset):
+    def __len__(self):
+        return len(self._flat)
+
+    def __getitem__(self, i):
+        key, kind, ent, rel = self._flat[i]
+
+        return TripleSample(
+            # ProjectorSample
+            key=key,
+            keyname=self.keyname,
+            indexes=self._get_indexes(key),
+            # TripleSample
+            kind=kind,
+            ent=ent,
+            rel=rel,
+        )
+
     def __init__(self, *args, **kwargs):
         log.info("create >[vertex triple ringbuffer]< dataset")
         super().__init__(*args, **kwargs)
         log.info("created triple dataset with {len(self)} samples")
+
+        self._flat = []
+
+        # h: VID, t: VID, r: RID
+        for h, t, r in self.irt2.closed_triples:
+            if h in self.rings:
+                self._flat.append((h, "head", t, r))
+            if t in self.rings:
+                self._flat.append((t, "tail", h, r))
+
+    @property
+    def description(self) -> str:
+        idx = random.randint(0, len(self))
+        sample = self[idx]
+        vid = sample.key
+
+        header = textwrap.dedent(
+            f"""
+            Vertex Triple Ringbuffer with ({len(self)} triples)
+            Example Sample {idx}: {self.irt2.vertices[vid]} ({vid=}):
+            """
+        )
+
+        body = textwrap.indent(sample.description, prefix="  ")
+        return header + body
+
+    @staticmethod
+    def collate_fn(
+        batch: list[TripleSample],
+    ) -> tuple[torch.Tensor, ..., list[TripleSample]]:
+        """Batch samples."""
+
+        h, t = [], []
+        for sample in batch:
+            dest = h if sample.kind == "head" else t
+            dest.append(sample)
+
+        def collate(batch):
+            _, padded, samples = RingDataset.collate_fn(batch)
+            er = torch.LongTensor([[sample.ent, sample.rel] for sample in batch])
+            return padded, er, samples
+
+        th, hr, h_samples = collate(h)
+        tt, tr, t_samples = collate(t)
+
+        def transfer(collation, device):
+            th, hr, h_samples, tt, tr, t_samples = collation
+
+            return (
+                th.to(device=device),
+                hr.to(device=device),
+                h_samples,
+                tt.to(device=device),
+                tr.to(device=device),
+                t_samples,
+            )
+
+        return transfer, th, hr, h_samples, tt, tr, t_samples
 
 
 PROJECTOR_DATASETS = {
@@ -1172,8 +1283,13 @@ class ProjectorModule(pl.LightningDataModule):
         raise NotImplementedError()
 
     def transfer_batch_to_device(self, collation, device, dataloader_idx):
-        batch, samples = collation
-        return batch.to(device=device), samples
+        # well this is kinda dumb but we cannot find out which dataset
+        # is currently providing collations so we let the collate_fn
+        # provide the transfer function
+
+        fn, *payload = collation
+        payload = fn(payload, device)
+        return payload
 
 
 # --- OPEN WORLD JOINT TRAINING

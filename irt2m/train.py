@@ -38,6 +38,10 @@ REG = {
         prefix="PMA",
         tags=["multi", "projector"],
     ),
+    "single context complex joint": dict(
+        prefix="JSC",
+        tags=["single", "joint"],
+    ),
 }
 
 assert set(REG) == set(MODELS), "missing registry information"
@@ -424,7 +428,7 @@ def _overwrite_config(config, **overwrites):
             opt = data.dotrslv(config, trail, skiplast=1)
             opt[trail.split(".")[-1]] = overwrites[key]
 
-            log.info(f'overwrite >[{trail}]< with {overwrites[key]}')
+            log.info(f"overwrite >[{trail}]< with {overwrites[key]}")
 
 
 def projector(config: list[str], **overwrites):

@@ -59,20 +59,30 @@ class Evaluation(enum.Enum):
 class Base(pl.LightningModule):
     """Base model with common functionality."""
 
+    irt2: IRT2
+    kgc: data.KGC
+    evaluations: set[Evaluation]
+
     config: data.Config
     encoder: tf.BertModel
     tokenizer: tf.BertTokenizer
 
     def __init__(
         self,
+        irt2: IRT2,
         config: data.Config,
         tokenizer: tf.BertTokenizer,
         freeze_encoder: bool = False,
     ):
         super().__init__()
 
+        self.irt2 = irt2
         self.config = config
         self.tokenizer = tokenizer
+
+        self.kgc = data.KGC(irt2)
+        self.evaluations = {Evaluation(name) for name in config["evaluations"]}
+        log.info(f"will run evaluations: {[p.value for p in self.evaluations]}")
 
         log.info(f"loading encoder model: {config['encoder']}")
         self.encoder = tf.BertModel.from_pretrained(
@@ -109,7 +119,12 @@ class Base(pl.LightningModule):
 
         return encoded[0]
 
+    # interface
+
     def forward(self, batch):
+        raise NotImplementedError()
+
+    def evaluate_kgc(self, which, **kwargs):
         raise NotImplementedError()
 
     # kgc
@@ -120,7 +135,6 @@ class Base(pl.LightningModule):
         # print(f"\n\n\nevaluate {which.value} {datetime.now()}\n")
         # log.info(f"running >[{which.value}]< evaluation")
 
-        evaluator = pykeen.evaluation.RankBasedEvaluator(filtered=True)
         dataset = self.kgc.dataset
 
         if which in {
@@ -163,19 +177,9 @@ class Base(pl.LightningModule):
             log.info("debug mode: reducing mapped triples for scoring")
             kwargs["mapped_triples"] = kwargs["mapped_triples"][:100]
 
-        model = self.kgc_model.model.to(device=self.device)
-        with self.replace_embeddings(which):
-            results = evaluator.evaluate(
-                model=model,
-                tqdm_kwargs=dict(
-                    leave=False,
-                    ncols=data.TERM_WIDTH,
-                    file=sys.stdout,
-                ),
-                **kwargs,
-            )
+        evaluator = pykeen.evaluation.RankBasedEvaluator(filtered=True)
+        results = self.evaluate_kgc(evaluator, which, **kwargs)
 
-        # self.kgc_model = self.kgc_model.cpu()
         return results
 
     def _log_kgc_results(self, which: Evaluation, results):
@@ -204,6 +208,22 @@ class Base(pl.LightningModule):
 
             with (path / fname).open(mode="w") as fd:
                 fd.write(yaml.safe_dump(results.to_dict()))
+
+    def on_fit_end(self):
+        log.info("finished fitting")
+
+    def on_train_start(self):
+        log.info("starting training")
+
+    def on_train_epoch_start(self):
+        log.info(f"starting training >[epoch {self.current_epoch}]<")
+        self.log("trainer/global_epoch", self.current_epoch)
+
+    def on_train_epoch_end(self):
+        log.info(f"training epoch {self.current_epoch} ended")
+
+    def on_validation_epoch_start(self, *_):
+        log.info("validation epoch start")
 
 
 # --- OPEN WORLD PROJECTOR TRAINING
@@ -296,13 +316,7 @@ class KGCModel:
 
 class Projector(Base):
 
-    # see __init__
-    irt2: IRT2
-
-    kgc: data.KGC
     kgc_model: KGCModel
-
-    evaluations: set[Evaluation]
 
     # see _init_projections
     targets: Tensor
@@ -494,6 +508,21 @@ class Projector(Base):
             log.info("restoring original kgc model")
             self.kgc_model.model.entity_representations[0] = old
 
+    def evaluate_kgc(self, evaluator, which, **kwargs):
+        model = self.kgc_model.model.to(device=self.device)
+        with self.replace_embeddings(which):
+            results = evaluator.evaluate(
+                model=model,
+                tqdm_kwargs=dict(
+                    leave=False,
+                    ncols=data.TERM_WIDTH,
+                    file=sys.stdout,
+                ),
+                **kwargs,
+            )
+
+        return results
+
     # /kgc embedding shenanigans
     # /projection management
     # ----------------------------------------
@@ -516,15 +545,8 @@ class Projector(Base):
     # ----------------------------------------
 
     def __init__(self, irt2: IRT2, config: dict, *args, **kwargs):
-        super().__init__(config, *args, **kwargs)
-
-        self.irt2 = irt2
-        self.kgc = data.KGC(irt2)
+        super().__init__(irt2, config, *args, **kwargs)
         self.kgc_model = KGCModel(config)
-
-        self.evaluations = {Evaluation(name) for name in config["evaluations"]}
-        log.info(f"will run evaluations: {[p.value for p in self.evaluations]}")
-
         self._init_projections()
 
     # ----------------------------------------
@@ -614,22 +636,6 @@ class Projector(Base):
         train = Evaluation.kgc_train
         if train in self.evaluations:
             self._kgc_train_results = self.run_kgc_evaluation(train)
-
-    def on_fit_end(self):
-        log.info("finished fitting")
-
-    def on_train_start(self):
-        log.info("starting training")
-
-    def on_train_epoch_start(self):
-        log.info(f"starting training >[epoch {self.current_epoch}]<")
-        self.log("trainer/global_epoch", self.current_epoch)
-
-    def on_train_epoch_end(self):
-        log.info(f"training epoch {self.current_epoch} ended")
-
-    def on_validation_epoch_start(self, *_):
-        log.info("validation epoch start")
 
     def on_validation_epoch_end(self, *_):
         log.info("validation epoch end")
@@ -779,8 +785,151 @@ class MultiAffineProjector(Projector):
         return self.loss(projected, target)
 
 
+class SingleComplexJoint(Base):
+
+    kgc: data.KGC
+
+    def _reset_embeddings(self):
+        log.info("resetting embeddings N(0, 1)")
+        for ember in (self.entities, self.relations):
+            torch.nn.init.normal_(ember.weight, mean=0.0, std=1.0)
+
+    def _init_embeddings(self):
+        # real and imaginary parts
+
+        self.relations = torch.nn.Embedding(
+            num_embeddings=len(self.irt2.relations),
+            embedding_dim=self.embedding_dim,
+        )
+
+        log.info("setup relation embedding of size {self.relations.shape}")
+
+        self.entities = torch.nn.Embedding(
+            num_embeddings=self.kgc.num_embeddings,
+            embedding_dim=self.embedding_dim,
+        )
+
+        log.info("setup entity embedding of size {self.entities.shape}")
+
+    def __init__(
+        self,
+        irt2: IRT2,
+        *args,
+        embedding_dim: int = None,
+        **kwargs,
+    ):
+        super().__init__(irt2, *args, **kwargs)
+
+        # real + imag
+        embedding_dim = embedding_dim * 2
+
+        self.project = torch.nn.Linear(
+            in_features=self.encoder.config.hidden_size,
+            out_features=embedding_dim,
+        )
+
+        self.score = pykeen.nn.functional.complex_interaction
+        self.loss = torch.nn.CrossEntropyLoss()
+
+        # noqa TODO assert is_complex
+        # noqa TODO add p2 regularizer (https://github.com/pykeen/pykeen/blob/70e46a8158e15f2d47ab1ac0cfac1ab0e8ae18bf/src/pykeen/regularizers.py#L148)
+
+        # num_entities = irt2.
+
+        self.entities = torch.nn.Embedding(
+            num_embeddings=self.kgc.closed_world_idxs.max().item() + 1,
+            embedding_dim=embedding_dim,
+        )
+
+        self.relations = torch.nn.Embedding(
+            num_embeddings=len(irt2.relations),
+            embedding_dim=embedding_dim,
+        )
+
+        log.info(f"initialized >[entity]< embedding: {self.entities.weight.shape}")
+        log.info(f"initialized >[relation]< embedding: {self.relations.weight.shape}")
+
+        self._reset_embeddings()
+
+    def _forward_directed(
+        self,
+        idxs: torch.Tensor,  # B x tokens
+        er: torch.Tensor,  # B x 2
+        kind: Literal["hr", "tr"],
+    ):
+        # view_as_complex: N x D x 2 -> N x D
+        # view_as_real:    N x D -> N x D x 2
+        complex = torch.view_as_complex
+
+        # hr -> target head idx, rel idx
+        # tr -> target tail idx, rel idx
+        assert kind in {"hr", "tr"}
+
+        B = idxs.shape[0]
+        E = self.entities.num_embeddings
+
+        # batch x text_dims
+        encs = self.encode(idxs)[:, 0]
+
+        # batch x embedding_dims
+        encs = complex(self.project(encs).view(B, -1, 2))
+
+        # batch x embedding_dims
+        rels = complex(self.entities(er[:, 0]).view((B, -1, 2)))
+
+        # batch x num_entities x embedding_dim
+        e, r = (
+            # [0, 1, 2] -> [0, 0, 0, 1, 1, 1, 2, 2, 2]
+            x.repeat_interleave(E, dim=0).view(B, E, -1)
+            for x in (encs, rels)
+        )
+
+        # batch x num_entities x embedding_dim
+        y = torch.stack(
+            [complex(self.entities.weight.view(E, -1, 2)) for _ in range(B)]
+        )
+
+        # eerie or ire
+        return (e, r, y) if kind == "tr" else (y, r, e)
+
+    def forward(self, collation: tuple[Tensor, list[data.TripleSample]]):
+        # th, tt: batch x tokens
+        # hr, tr: batch x 2
+        th, hr, h_samples, tt, tr, t_samples = collation
+
+        # triple: batch x num_entities x embedding_dim
+        x_h = self._forward_directed(th, hr, kind="hr")
+        x_t = self._forward_directed(tt, tr, kind="tr")
+
+        h, r, t = list(map(torch.cat, zip(x_h, x_t)))
+
+        # do some triple scoring magic
+        scores = self.score(h, r, t)
+        targets = torch.cat((hr[:, 1], tr[:, 1]))
+
+        loss = self.loss(scores, targets)
+        self.log("training/loss", loss)
+
+    def evaluate_kgc(self, evaluator, which, **kwargs):
+        raise NotImplementedError()
+
+    def training_step(
+        self,
+        collation: tuple[Tensor, list[data.ProjectorSample]],
+        batch_idx,
+    ):
+        self.forward(collation)
+
+    # def validation_step(
+    #     self,
+    #     collation: tuple[Tensor, list[data.ProjectorSample]],
+    #     batch_idx,
+    # ):
+    #     pass
+
+
 MODELS = {
     "single context affine projector": SingleAffineProjector,
     "multi context affine projector": MultiAffineProjector,
-    # "single context complex joint": SingleComplexJoint,
+    "single context complex joint": SingleComplexJoint,
 }
