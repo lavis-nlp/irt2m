@@ -727,7 +727,7 @@ class MultiAffineProjector(Projector):
     pooling: Literal["mean", "max"]
 
     def __init__(self, *args, pooling: str = "mean", **kwargs):
-        super().__init__(*args, pooling=pooling, **kwargs)
+        super().__init__(*args, **kwargs)
 
         self.pooling = pooling
         log.info(f"aggregations will be >[{self.pooling}-pooled]<")
@@ -782,4 +782,5 @@ class MultiAffineProjector(Projector):
 MODELS = {
     "single context affine projector": SingleAffineProjector,
     "multi context affine projector": MultiAffineProjector,
+    # "single context complex joint": SingleComplexJoint,
 }
