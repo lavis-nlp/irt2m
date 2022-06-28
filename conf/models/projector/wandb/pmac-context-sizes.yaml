@@ -1,0 +1,32 @@
+# use the wandb agent to run the sweep
+# goal: ablation over different context sizes
+name: PMAC Full
+description: Full run for all PMAC combinations
+project: irt2-projector
+
+method: grid
+metric:
+  name: kgc/inductive/hits@10
+  goal: maximize
+
+parameters:
+  masked:
+    values:
+    - true
+    - false
+
+  config:
+    values:
+      - conf/models/projector/data/irt2-cde-tiny.yaml
+      - conf/models/projector/data/irt2-cde-small.yaml
+      - conf/models/projector/data/irt2-cde-medium.yaml
+      - conf/models/projector/data/irt2-cde-large.yaml
+
+program: irt2m
+command:
+  - ${program}
+  - train
+  - projector
+  - --config=conf/models/projector/base.yaml
+  - --config=conf/models/projector/models/single-affine-projector.yaml
+  - ${args}

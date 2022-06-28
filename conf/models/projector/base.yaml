@@ -38,7 +38,7 @@ scheduler_kwargs: {}
 
 trainer:
   gpus: 1
-  max_epochs: 100
+  max_epochs: 200
 
   # this is the "debug" flag
   fast_dev_run: false
