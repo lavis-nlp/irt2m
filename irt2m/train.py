@@ -437,6 +437,19 @@ def _overwrite_config(config, **overwrites):
             log.info(f"overwrite >[{trail}]< with {overwrites[key]}")
 
 
+def _set_mode(config):
+    assert config["mode"] in {"probe", "limited", "full"}
+    trainconf = config["trainer"]
+
+    if config["mode"] == "probe":
+        trainconf["fast_dev_run"] = True
+
+    if config["mode"] == "limited":
+        N = 10
+        trainconf["limit_train_batches"] = N
+        trainconf["limit_val_batches"] = N
+
+
 def projector(config: list[str], **overwrites):
     """Train a projector."""
 
@@ -452,8 +465,9 @@ def projector(config: list[str], **overwrites):
 
     irt2, config = _load_config_and_irt2(config, config_handler)
     _overwrite_config(config, **overwrites)
+    _set_mode(config)
 
-    debug = config["trainer"]["fast_dev_run"]
+    debug = config["mode"] in {"probe", "limited"}
     out = kpath(config["out"], create=not debug)
 
     if not debug:

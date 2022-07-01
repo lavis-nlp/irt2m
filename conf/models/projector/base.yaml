@@ -20,6 +20,26 @@ evaluations:
   - kgc/inductive     # open world kgc with projections (irt2.open_kgc_val*)
 
 
+# there are three modes:
+#    probe:
+#      - do the "fast_dev_run" for sanity checks:
+#        one batch per train and validation
+#      - logger is disabled
+#      - no data is written to disk
+#    limited:
+#      - run 10 batches per validation and train
+#      - evaluate 100 triples in kgc evaluation
+#      - logger is disabled
+#      - no data is written to disk
+#    full
+#      - run all batches
+#      - logging to wandb
+#      - all data is written to disk
+
+# mode: probe
+# mode: limited
+mode: full
+
 # pytorch lightning
 
 checkpoint:
@@ -39,11 +59,6 @@ scheduler_kwargs: {}
 trainer:
   gpus: 1
   max_epochs: 200
-
-  # this is the "debug" flag
-  fast_dev_run: false
-  # limit_train_batches: 10
-  # limit_val_batches: 10
 
 wandb:
   project: irt2-projector

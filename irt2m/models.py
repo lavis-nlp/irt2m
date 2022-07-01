@@ -113,7 +113,7 @@ class Projector(pl.LightningModule):
 
     @property
     def debug(self) -> bool:
-        return self.config["trainer"]["fast_dev_run"]
+        return self.config["mode"] in {"probe", "limited"}
 
     @property
     def subbatch_size(self) -> int:
@@ -331,7 +331,7 @@ class Projector(pl.LightningModule):
         if self.debug:
             # choice arbitrary
             log.info("debug mode: reducing mapped triples for scoring")
-        kwargs["mapped_triples"] = kwargs["mapped_triples"][:100]
+            kwargs["mapped_triples"] = kwargs["mapped_triples"][:100]
 
         evaluator = pykeen.evaluation.RankBasedEvaluator(filtered=True)
         results = self.evaluate_kgc(evaluator, which, **kwargs)
