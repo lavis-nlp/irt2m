@@ -42,6 +42,10 @@ REG = {
         prefix="JSC",
         tags=["single", "joint"],
     ),
+    "multi context complex joint": dict(
+        prefix="JMC",
+        tags=["multi", "joint"],
+    ),
 }
 
 assert set(REG) == set(MODELS), "missing registry information"

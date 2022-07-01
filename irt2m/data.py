@@ -1183,7 +1183,7 @@ class VertexTripleRingbuffer(VertexDataset, RingDataset):
                 return torch.zeros(0), torch.zeros(0), []
 
             _, padded, samples = RingDataset.collate_fn(batch)
-            er = torch.LongTensor([[sample.ent, sample.rel] for sample in batch])
+            er = torch.LongTensor([[sample.ent, sample.rel] for sample in samples])
             return padded, er, samples
 
         th, hr, h_samples = collate(h)

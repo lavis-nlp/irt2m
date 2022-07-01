@@ -34,7 +34,47 @@ tf.logging.set_verbosity_error()
 
 OPTIMIZER = {
     "adam": torch.optim.Adam,
+    "adamw": torch.optim.AdamW,
 }
+
+
+# --
+# functional / shared between models
+
+
+# batch x dims -> dims
+def f_pool(T, reduction: Literal["mean", "max"]):
+    if reduction == "max":
+        return T.max(axis=0).values
+
+    elif reduction == "mean":
+        return T.mean(axis=0)
+
+
+# batch x dims -> unique samples x dims
+def f_reduce_multi(
+    aggregated,
+    samples,
+    reduction: Literal["mean", "max"],
+):
+    # inner-batch indexes
+    counter = count()
+
+    keys = {sample.key: sample for sample in samples}
+    flat = [sample.key for sample in samples]
+
+    # e.g. given two entities and a batch_size of 5:
+    # (8, 8, 8, 7, 7) -> [(8, [0, 1, 2]), (7, [3, 4])]
+    grouped = [
+        (entity, [next(counter) for _ in grouper]) for entity, grouper in groupby(flat)
+    ]
+
+    # batch x kge_dims -> unique entities x kge_dims
+    pooled = [f_pool(aggregated[idxs], reduction) for _, idxs in grouped]
+    pooled = torch.vstack(pooled)
+
+    unique_keys = tuple(zip(*grouped))[0]
+    return pooled, [keys[key] for key in unique_keys]
 
 
 # --
@@ -67,9 +107,19 @@ class Projector(pl.LightningModule):
     encoder: tf.BertModel
     tokenizer: tf.BertTokenizer
 
+    # We use manual optimization (gradient accumulation for multi-context models)
+    # https://pytorch-lightning.readthedocs.io/en/1.5.10/common/optimizers.html
+    automatic_optimization = False
+
     @property
     def debug(self) -> bool:
         return self.config["trainer"]["fast_dev_run"]
+
+    @property
+    def subbatch_size(self) -> int:
+        return self.trainer.train_dataloader.loaders.subbatch_size
+
+    # --
 
     def _init_projections(self, total, dim, dtype=None):
         # registering buffers to assure that they are (1) not part
@@ -171,8 +221,7 @@ class Projector(pl.LightningModule):
         projections = self.projections[idxs][mask]
         targets = targets[idxs][mask]
 
-        compare = torch.nn.functional.mse_loss
-        error = compare(projections, targets)
+        error = torch.dist(projections, targets) / targets.shape[1]
 
         return error
 
@@ -547,10 +596,6 @@ class KGCProjector(Projector):
     projections: Tensor
     projections_counts: Tensor
 
-    # We use manual optimization (gradient accumulation for multi-context models)
-    # https://pytorch-lightning.readthedocs.io/en/1.5.10/common/optimizers.html
-    automatic_optimization = False
-
     # ----------------------------------------
     # projection management
 
@@ -623,10 +668,6 @@ class KGCProjector(Projector):
 
     # ----------------------------------------
     # lightning callbacks and training
-
-    @property
-    def subbatch_size(self) -> int:
-        return self.trainer.train_dataloader.loaders.subbatch_size
 
     def _subbatch(self, batch, samples):
         # sub-batching and gradient accumulation
@@ -748,7 +789,6 @@ class SingleAffineProjector(KGCProjector):
         super().__init__(*args, **kwargs)
 
         self.loss = torch.nn.MSELoss()
-
         self.projector = torch.nn.Linear(
             self.encoder.config.hidden_size,
             self.kgc_embedding_dim,
@@ -765,7 +805,6 @@ class SingleAffineProjector(KGCProjector):
 
     def compare(self, projected, target):
         return self.loss(projected, target)
-        # return torch.dist(projected, target, p=2) / projected.shape[0]
 
 
 class MultiAffineProjector(KGCProjector):
@@ -787,36 +826,8 @@ class MultiAffineProjector(KGCProjector):
     def aggregate(self, encoded):
         return encoded[:, 0]
 
-    def pool(self, T):  # B x D -> D
-        if self.pooling == "max":
-            return T.max(axis=0).values
-
-        elif self.pooling == "mean":
-            return T.mean(axis=0)
-
-        else:
-            assert False, f"unknown pooling strategy {self.pooling}"
-
     def reduce(self, aggregated, samples):
-        # inner-batch indexes
-        counter = count()
-
-        keys = {sample.key: sample for sample in samples}
-        flat = [sample.key for sample in samples]
-
-        # e.g. given two entities and a batch_size of 5:
-        # (8, 8, 8, 7, 7) -> [(8, [0, 1y, 2]), (7, [3, 4])]
-        grouped = [
-            (entity, [next(counter) for _ in grouper])
-            for entity, grouper in groupby(flat)
-        ]
-
-        # batch x kge_dims -> unique entities x kge_dims
-        pooled = [self.pool(aggregated[idxs]) for _, idxs in grouped]
-        pooled = torch.vstack(pooled)
-
-        unique_keys = tuple(zip(*grouped))[0]
-        return pooled, [keys[key] for key in unique_keys]
+        return f_reduce_multi(aggregated, samples, self.pooling)
 
     def project(self, reduced: Tensor):
         return self.projector(reduced)
@@ -831,11 +842,6 @@ class MultiAffineProjector(KGCProjector):
 
 
 class JointProjector(Projector):
-    pass
-
-
-class SingleComplexJoint(JointProjector):
-
     kgc: data.KGC
 
     def __init__(
@@ -888,6 +894,25 @@ class SingleComplexJoint(JointProjector):
             dtype=torch.cfloat,
         )
 
+    def _forward_project(self, collation):
+        idxs, samples = collation
+        B = idxs.shape[0]
+
+        # view_as_complex: N x D x 2 -> N x D
+        # view_as_real:    N x D -> N x D x 2
+        complex = torch.view_as_complex
+
+        # batch x text_dims
+        encs = self.encode(idxs)[:, 0]
+
+        # (unique) samples x text_dims
+        self.reduce(encs, samples)
+
+        # (unique) samples x embedding_dims
+        encs = complex(self.project(encs).view(B, -1, 2))
+
+        return encs, samples
+
     def _forward_directed(
         self,
         idxs: torch.Tensor,  # B x tokens
@@ -906,6 +931,7 @@ class SingleComplexJoint(JointProjector):
         B = idxs.shape[0]
         E = self.entities.max_id
 
+        # batch x embedding_dims
         encs, samples = self._forward_project((idxs, samples))
 
         # batch x embedding_dims
@@ -926,61 +952,77 @@ class SingleComplexJoint(JointProjector):
         h, r, t = (e, r, y) if kind == "tr" else (y, r, e)
         return (h, r, t), encs, samples
 
+    def _subbatch(self, collation):
+        # take the head and tail parts separately
+        head, tail = collation[:3], collation[3:]
+        assert len(head) == len(tail)
+
+        # figure out the subbatch steps over all samples
+        N = len(head[-1]) + len(tail[-1])
+        steps = range(0, N, self.subbatch_size)
+        offset = len(head[-1])
+
+        # given 3 head samples and 5 tail samples
+        # with a subbatch size of 5:
+        #   j=0, k=5, l=0, m=2  -> 3 head, 2 tail
+        #   j=5, k=8, l=2, m=5  -> 0 head, 3 tail
+        for j, k in zip_longest(steps, steps[1:], fillvalue=N):
+            l, m = max(0, j - offset), max(0, k - offset)
+            s1, s2 = slice(j, k), slice(l, m)
+
+            t1 = tuple(map(lambda h: h[s1], head))
+            t2 = tuple(map(lambda t: t[s2], tail))
+
+            yield t1 + t2
+
     def training_step(
         self,
         collation: tuple[Tensor, list[data.TripleSample]],
         batch_idx,
     ):
-        # th, tt: batch x tokens
-        # hr, tr: batch x 2
-        th, hr, h_samples, tt, tr, t_samples = collation
+        losses = []
+        optimizer = self.optimizers()
 
-        # if not batch_idx or not h_samples or not t_samples:
-        #     breakpoint()
+        for subcollation in self._subbatch(collation):
+            # th, tt: batch x tokens (int)
+            # hr, tr: batch x 2 (int)
+            th, hr, h_samples, tt, tr, t_samples = subcollation
 
-        x_h, h_encs, h_samples = self._forward_directed(th, hr, "hr", h_samples)
-        x_t, t_encs, t_samples = self._forward_directed(tt, tr, "tr", t_samples)
+            x_h, h_encs, h_samples = self._forward_directed(th, hr, "hr", h_samples)
+            x_t, t_encs, t_samples = self._forward_directed(tt, tr, "tr", t_samples)
 
-        # h, r, t: batch x num_entities x embedding_dim
-        # samples: batch
-        # encs: batch x embedding_dim
-        h, r, t = list(map(torch.cat, zip(x_h, x_t)))
-        samples = h_samples + t_samples
-        encs = torch.cat((h_encs, t_encs))
+            # h, r, t: batch x num_entities x embedding_dim
+            # samples: batch
+            # encs: batch x embedding_dim
+            h, r, t = list(map(torch.cat, zip(x_h, x_t)))
+            samples = h_samples + t_samples
+            encs = torch.cat((h_encs, t_encs))
 
-        # score them triples
-        # batch x num_entities
-        scores = self.scorer.interaction(h, r, t)
-        targets = torch.cat(
-            (
-                hr[:, 0] if len(hr) else self.void_i,
-                tr[:, 0] if len(tr) else self.void_i,
+            # score them triples
+            # batch x num_entities
+            scores = self.scorer.interaction(h, r, t)
+            targets = torch.cat(
+                (
+                    hr[:, 0] if len(hr) else self.void_i,
+                    tr[:, 0] if len(tr) else self.void_i,
+                )
             )
-        )
 
-        loss = self.loss(scores, targets)
+            loss = self.loss(scores, targets)
+            losses.append(loss)
+
+            self.manual_backward(loss)
+            self.update_projections(encs, samples)
+
+        optimizer.step()
+        optimizer.zero_grad()
+
+        loss = torch.stack(losses).mean()
         self.log("training/loss", loss)
 
-        self.update_projections(encs, samples)
         return loss
 
     # --
-
-    def _forward_project(self, collation):
-        idxs, samples = collation
-        B = idxs.shape[0]
-
-        # view_as_complex: N x D x 2 -> N x D
-        # view_as_real:    N x D -> N x D x 2
-        complex = torch.view_as_complex
-
-        # batch x text_dims
-        encs = self.encode(idxs)[:, 0]
-
-        # batch x embedding_dims
-        encs = complex(self.project(encs).view(B, -1, 2))
-
-        return encs, samples
 
     def validation_step(
         self,
@@ -991,6 +1033,9 @@ class SingleComplexJoint(JointProjector):
         self.update_projections(projections, samples)
 
     # --
+
+    def projection_error(self):
+        return self._projection_error(self.entities(None))
 
     def evaluate_kgc(self, evaluator, which, **kwargs):
         model = self.scorer
@@ -1010,9 +1055,6 @@ class SingleComplexJoint(JointProjector):
 
         return results
 
-    def projection_error(self):
-        return self._projection_error(self.entities(None))
-
     def on_fit_start(self):
         super().on_fit_start()
 
@@ -1023,8 +1065,30 @@ class SingleComplexJoint(JointProjector):
         self.void_c = torch.zeros(0).to(device=self.device, dtype=torch.cfloat)
 
 
+class SingleComplexJoint(JointProjector):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def reduce(self, aggregated, samples):
+        return aggregated, samples
+
+
+class MultiComplexJoint(JointProjector):
+    pooling: Literal["mean", "max"]
+
+    def __init__(self, *args, pooling: str = "mean", **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.pooling = pooling
+        log.info(f"aggregations will be >[{self.pooling}-pooled]<")
+
+    def reduce(self, aggregated, samples):
+        return f_reduce_multi(aggregated, samples, self.pooling)
+
+
 MODELS = {
     "single context affine projector": SingleAffineProjector,
     "multi context affine projector": MultiAffineProjector,
     "single context complex joint": SingleComplexJoint,
+    "multi context complex joint": MultiComplexJoint,
 }
