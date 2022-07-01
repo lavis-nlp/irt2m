@@ -2,6 +2,11 @@
 model: single context complex joint
 model_kwargs:
   embedding_dim: 500
+  regularizer: LPRegularizer
+  regularizer_kwargs:
+    p: 2.0
+    weight: 0.1
+    normalize: true
 
 # for available datasets see irt2m.data.PROJECTOR_DATASETS
 #   and their respective __init__ methods for *ds_kwargs
@@ -16,7 +21,7 @@ module:
     max_contexts_per_sample: 10
   train_loader_kwargs:
     shuffle: true
-    batch_size: 10
+    batch_size: 5
     subbatch_size: 10
 
   valid_ds: mention flat

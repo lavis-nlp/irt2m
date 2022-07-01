@@ -273,15 +273,18 @@ def fit(trainer, model, datamodule, debug):
         print(f"Exception: {exc}")
         print(callstack)
 
+        raise exc
+
 
 # -- OW PROJECTOR TRAINING
 
 
 # registers config['prefix']
 def _config_add_prefix(config, irt2) -> str:
-    prefix = REG[config["model"]]["prefix"]
+    reg = REG[config["model"]]
+    prefix = reg["prefix"]
 
-    if "kgc" in config:
+    if "kgc" in config and "projector" in reg["tags"]:
         kgc_model = list(config["kgc"])[0]
         if kgc_model == "complex":
             prefix += "C"
@@ -298,8 +301,7 @@ def _config_add_tags(config, irt2) -> str:
         config["module"]["train_ds"],
     ]
 
-    if config["model"].endswith("projector"):
-        tags += REG[config["model"]]["tags"]
+    tags += REG[config["model"]]["tags"]
 
     if "kgc" in config:
         tags += list(config["kgc"])

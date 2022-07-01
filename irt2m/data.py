@@ -158,6 +158,22 @@ class KGC:
         return torch.LongTensor(sorted(cw))
 
     @cached_property
+    def closed_world_dataset(self) -> pykeen.triples.TriplesFactory:
+        """Special extra dataset containing only closed-world vertices."""
+        old = self.dataset.training
+        triples = old.mapped_triples
+
+        e2id = {self.idx2str[v]: v for v in triples[:, (0, 2)].ravel().tolist()}
+
+        new = pykeen.triples.TriplesFactory.create(mapped_triples=triples)
+        new = new.with_labels(
+            entity_to_id=e2id,
+            relation_to_id=old.relation_to_id,
+        )
+
+        return new
+
+    @cached_property
     def open_world_idxs(self) -> torch.LongTensor:
         return torch.LongTensor(sorted(self.idx2mid))
 
@@ -1114,16 +1130,25 @@ class VertexTripleRingbuffer(VertexDataset, RingDataset):
     def __init__(self, *args, **kwargs):
         log.info("create >[vertex triple ringbuffer]< dataset")
         super().__init__(*args, **kwargs)
-        log.info("created triple dataset with {len(self)} samples")
 
         self._flat = []
+        skipped = 0
 
         # h: VID, t: VID, r: RID
         for h, t, r in self.irt2.closed_triples:
+            if h not in self.keys or t not in self.keys:
+                skipped += 1
+                continue
+
             if h in self.rings:
                 self._flat.append((h, "head", t, r))
             if t in self.rings:
                 self._flat.append((t, "tail", h, r))
+
+        log.info(
+            f"created triple dataset with {len(self)} samples "
+            f"(skipped {skipped} triples without contexts)"
+        )
 
     @property
     def description(self) -> str:
@@ -1153,6 +1178,9 @@ class VertexTripleRingbuffer(VertexDataset, RingDataset):
             dest.append(sample)
 
         def collate(batch):
+            if len(batch) == 0:
+                return torch.zeros(0), torch.zeros(0), []
+
             _, padded, samples = RingDataset.collate_fn(batch)
             er = torch.LongTensor([[sample.ent, sample.rel] for sample in batch])
             return padded, er, samples

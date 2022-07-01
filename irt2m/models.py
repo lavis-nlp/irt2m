@@ -42,21 +42,21 @@ OPTIMIZER = {
 
 class Evaluation(enum.Enum):
 
-    # original closed world
+    # closed world embeddings
     kgc_train = "kgc/train"
 
-    # projected closed world
+    # closed world projections
     kgc_transductive = "kgc/transductive"
 
-    # projected open world (validation split)
+    # open world (validation split) projections
     kgc_inductive = "kgc/inductive"
 
-    # projected open world (test split)
+    # open world (test split) projections
     kgc_test = "kgc/test"
 
 
 # not using abc to avoid multi-inheritance
-class Base(pl.LightningModule):
+class Projector(pl.LightningModule):
     """Base model with common functionality."""
 
     irt2: IRT2
@@ -66,6 +66,115 @@ class Base(pl.LightningModule):
     config: data.Config
     encoder: tf.BertModel
     tokenizer: tf.BertTokenizer
+
+    @property
+    def debug(self) -> bool:
+        return self.config["trainer"]["fast_dev_run"]
+
+    def _init_projections(self, total, dim, dtype=None):
+        # registering buffers to assure that they are (1) not part
+        # of any gradient computation and (2) always on the correct device
+
+        self.register_buffer(
+            "projections",
+            torch.zeros((total, dim), dtype=dtype),
+        )
+        self.register_buffer(
+            "projections_counts",
+            torch.zeros((total,), dtype=torch.int),
+        )
+
+        log.info(
+            "registered projections buffer: "
+            f"{self.projections.shape[0]} x {self.projections.shape[1]} "
+            f"({self.projections.dtype})"
+        )
+        self._gathered_projections = False
+
+    def clear_projections(self):
+        """
+        Initialize projection buffer
+
+        This needs to be run before every dataloader iteration.
+        After text samples have been provided by calling forward(),
+        they need to reduced by invoking gather_projections().
+
+        (!) Indexes used for projections are the pykeen entity indexes.
+        A mapping of irt2m indexes to pykeen indexes is given by
+        the provided pykeen triple factories.
+
+        """
+        log.info("! clearing projections buffer")
+
+        self.projections.zero_()
+        self.projections_counts.zero_()
+        self._gathered_projections = False
+
+    def _log_projection_stats(self):
+        def _perc(f):
+            return f"{round(f.item() * 100)}%"
+
+        def _stats(which, idxs):
+            projections = self.projections_counts[idxs]
+
+            mask = projections != 0
+            count = mask.sum()
+            total = int(projections[mask].sum().item())
+            ratio = total / count
+            perc = _perc(count / len(idxs))
+
+            log.info(
+                f" >[{which} projections]< "
+                f" {count}/{len(idxs)} ({perc}) items"
+                f" with {total} projections ({ratio=:.2f})"
+            )
+
+        _stats("transductive", self.kgc.closed_world_idxs)
+        _stats("inductive", self.kgc.open_world_idxs_val)
+        _stats("test", self.kgc.open_world_idxs_test)
+
+    def gather_projections(self, force: bool = False):
+        if not force and self.global_step == 0:
+            log.warning("skipping projection gathering (not trained yet)!")
+            self.clear_projections()
+            self._gathered_projections = True
+            return
+
+        self._log_projection_stats()
+
+        # calculate averages over all projections
+        mask = self.projections_counts != 0
+        self.projections[mask] /= self.projections_counts.unsqueeze(1)[mask]
+
+        # TODO assert this reflect context counts of datasets
+        self._gathered_projections = True
+
+    def update_projections(
+        self,
+        projected: Tensor,
+        samples: list[data.ProjectorSample],
+    ):
+        assert len(samples) == projected.shape[0]
+
+        idxs = [self.kgc.key2idx(s.keyname, s.key) for s in samples]
+
+        for v, idx in zip(projected.detach(), idxs):
+            self.projections[idx] += v
+            self.projections_counts[idx] += 1
+
+    def _projection_error(self, targets):
+        assert self._gathered_projections
+
+        idxs = self.kgc.closed_world_idxs
+        mask = self.projections_counts[idxs] != 0
+
+        projections = self.projections[idxs][mask]
+        targets = targets[idxs][mask]
+
+        compare = torch.nn.functional.mse_loss
+        error = compare(projections, targets)
+
+        return error
 
     def __init__(
         self,
@@ -130,8 +239,6 @@ class Base(pl.LightningModule):
     # kgc
 
     def run_kgc_evaluation(self, which: Evaluation) -> dict:
-        self.targets = self.targets.to(device=self.device)
-
         # print(f"\n\n\nevaluate {which.value} {datetime.now()}\n")
         # log.info(f"running >[{which.value}]< evaluation")
 
@@ -175,7 +282,7 @@ class Base(pl.LightningModule):
         if self.debug:
             # choice arbitrary
             log.info("debug mode: reducing mapped triples for scoring")
-            kwargs["mapped_triples"] = kwargs["mapped_triples"][:100]
+        kwargs["mapped_triples"] = kwargs["mapped_triples"][:100]
 
         evaluator = pykeen.evaluation.RankBasedEvaluator(filtered=True)
         results = self.evaluate_kgc(evaluator, which, **kwargs)
@@ -209,6 +316,86 @@ class Base(pl.LightningModule):
             with (path / fname).open(mode="w") as fd:
                 fd.write(yaml.safe_dump(results.to_dict()))
 
+    # kgc embedding shenanigans
+
+    def _overwrite_embedding(
+        self,
+        which: Evaluation,
+        new: pykeen.nn.Embedding,
+        closed_world: torch.Tensor,
+    ):
+
+        cw_idxs = self.kgc.closed_world_idxs
+        ow_idxs = self.kgc.open_world_idxs
+
+        # train uses the original embeddings
+        # (which also checks whether the targets tensor is correct)
+        if which is Evaluation.kgc_train:
+            idxs, source = cw_idxs, closed_world
+
+        if which is Evaluation.kgc_transductive:
+            idxs, source = cw_idxs, self.projections
+
+        if which is Evaluation.kgc_inductive:
+            idxs, source = ow_idxs, self.projections
+
+        if which is Evaluation.kgc_test:
+            idxs, source = ow_idxs, self.projections
+
+        # pykeen directly modifies the _embedding.weight.data
+        # https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L395
+        log.info(f"replacing {len(idxs)} embeddings for {which.value}")
+
+        # https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L407
+        if torch.is_complex(source):
+            source = torch.view_as_real(source).view((source.shape[0], -1))
+
+        new._embeddings.weight[idxs] = source[idxs]
+
+    @contextmanager
+    def replace_embeddings(
+        self,
+        which: Evaluation,
+        model: pykeen.models.ERModel,
+        old: pykeen.nn.Embedding,
+        # closed_world=self.targets in case of KGCProjector
+        # closed_world=self.entities in case of JointProjector
+        closed_world: torch.Tensor,
+    ):
+
+        # https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/models/unimodal/complex.py#L102
+        new = old.__class__(
+            max_id=self.kgc.num_embeddings,
+            shape=old.shape,
+            # https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/models/unimodal/complex.py#L106
+            dtype=torch.cfloat if old.is_complex else torch.get_default_dtype(),
+            regularizer=old.regularizer,
+            trainable=False,
+        )
+
+        new = new.to(device=self.device)
+
+        # always provide the closed-world embeddings
+        self._overwrite_embedding(Evaluation.kgc_train, new, closed_world)
+
+        if which is not Evaluation.kgc_train:
+            self._overwrite_embedding(which, new, closed_world)
+
+        model.entity_representations[0] = new
+
+        try:
+            yield
+
+        except Exception as exc:
+            log.error(f"kgc evaluation error: {exc}")
+
+        finally:
+            log.info("restoring original kgc model")
+            model.entity_representations[0] = old
+
+    # /kgc embedding shenanigans
+    # ----------------------------------------
+
     def on_fit_end(self):
         log.info("finished fitting")
 
@@ -224,6 +411,43 @@ class Base(pl.LightningModule):
 
     def on_validation_epoch_start(self, *_):
         log.info("validation epoch start")
+
+    def on_fit_start(self):
+        print("\n\n")
+        print(self.kgc.description)
+        print()
+
+        print("\nFITTING\n")
+        log.info("starting to fit")
+
+        train = Evaluation.kgc_train
+        if train in self.evaluations:
+            self._kgc_train_results = self.run_kgc_evaluation(train)
+
+    def on_validation_epoch_end(self, *_):
+        log.info("validation epoch end")
+
+        self.gather_projections()
+
+        # log the average distance between projections
+        # and targets (somewhat of a validation loss)
+
+        if not self.global_step == 0:
+            error = self.projection_error()
+            self.log("training/projection_error", error)
+
+        # continuously log the baseline for a nice transductive plot
+        train = Evaluation.kgc_train
+        if train in self.evaluations:
+            self._log_kgc_results(train, self._kgc_train_results)
+
+        # run evaluations with projections
+        evaluations = {Evaluation.kgc_transductive, Evaluation.kgc_inductive}
+        for which in evaluations & self.evaluations:
+            results = self.run_kgc_evaluation(which)
+            self._log_kgc_results(which, results)
+
+        self.clear_projections()
 
 
 # --- OPEN WORLD PROJECTOR TRAINING
@@ -314,7 +538,7 @@ class KGCModel:
         self.model = torch.load(model)
 
 
-class Projector(Base):
+class KGCProjector(Projector):
 
     kgc_model: KGCModel
 
@@ -327,14 +551,15 @@ class Projector(Base):
     # https://pytorch-lightning.readthedocs.io/en/1.5.10/common/optimizers.html
     automatic_optimization = False
 
-    @property
-    def debug(self) -> bool:
-        return self.config["trainer"]["fast_dev_run"]
-
     # ----------------------------------------
     # projection management
 
     def _init_projections(self):
+        # when using a buffer to save reference embeddings, pytorch crashes
+        # with "Trying to backward through the graph a second time (or directly
+        # access saved tensors after they have already been freed)"
+        # self.register_buffer("targets", embedding)
+
         # init reference embedding
         self.targets = self.cw_entity_embedding._embeddings.weight.detach()
         self.targets = self.targets.to(device=self.device)
@@ -346,171 +571,15 @@ class Projector(Base):
         total = self.kgc.num_embeddings
         # total = self.kgc.dataset.num_entities
 
-        # registering buffers to assure that they are (1) not part
-        # of any gradient computation and (2) always on the correct device
-
-        self.register_buffer("projections", torch.zeros((total, dim)))
-        self.register_buffer("projections_counts", torch.zeros(total))
-
-        # note: when using a buffer to save reference embeddings, pytorch crashes
-        # with "Trying to backward through the graph a second time (or directly
-        # access saved tensors after they have already been freed)"
-        # self.register_buffer("targets", embedding)
-
-        log.info(f"registered projections buffer: {self.projections.shape}")
         log.info(f"registered target tensor: {self.targets.shape}")
-        self._gathered_projections = False
-
-    def clear_projections(self):
-        """
-        Initialize projection buffer
-
-        This needs to be run before every dataloader iteration.
-        After text samples have been provided by calling forward(),
-        they need to reduced by invoking gather_projections().
-
-        (!) Indexes used for projections are the pykeen entity indexes.
-        A mapping of irt2m indexes to pykeen indexes is given by
-        the provided pykeen triple factories.
-
-        """
-        log.info("! clearing projections buffer")
-
-        self.projections.zero_()
-        self.projections_counts.zero_()
-        self._gathered_projections = False
-
-    def _log_projection_stats(self):
-        def _perc(f):
-            return f"{round(f.item() * 100)}%"
-
-        def _stats(which, idxs):
-            projections = self.projections_counts[idxs]
-
-            mask = projections != 0
-            count = mask.sum()
-            total = int(projections[mask].sum().item())
-            ratio = total / count
-            perc = _perc(count / len(idxs))
-
-            log.info(
-                f" >[{which} projections]< "
-                f" {count}/{len(idxs)} ({perc}) items"
-                f" with {total} projections ({ratio=:.2f})"
-            )
-
-        _stats("transductive", self.kgc.closed_world_idxs)
-        _stats("inductive", self.kgc.open_world_idxs_val)
-        _stats("test", self.kgc.open_world_idxs_test)
-
-    def gather_projections(self, force: bool = False):
-        if not force and self.global_step == 0:
-            log.warning("skipping projection gathering (not trained yet)!")
-            self.clear_projections()
-            self._gathered_projections = True
-            return
-
-        self._log_projection_stats()
-
-        # calculate averages over all projections
-        mask = self.projections_counts != 0
-        self.projections[mask] /= self.projections_counts.unsqueeze(1)[mask]
-
-        # TODO assert this reflect context counts of datasets
-        self._gathered_projections = True
-
-    def update_projections(
-        self,
-        projected: Tensor,
-        samples: list[data.ProjectorSample],
-    ):
-        assert len(samples) == projected.shape[0]
-
-        idxs = [self.kgc.key2idx(s.keyname, s.key) for s in samples]
-
-        for v, idx in zip(projected.detach(), idxs):
-            self.projections[idx] += v
-            self.projections_counts[idx] += 1
-
-    def projection_error(self):
-        assert self._gathered_projections
-
-        idxs = self.kgc.closed_world_idxs
-        mask = self.projections_counts[idxs] != 0
-
-        projections = self.projections[idxs][mask]
-        targets = self.targets[idxs][mask]
-
-        error = self.compare(projections, targets)
-        return error
-
-    # kgc embedding shenanigans
-
-    def _overwrite_embedding(
-        self,
-        which: Evaluation,
-        new: pykeen.nn.Embedding,
-    ):
-
-        cw_idxs = self.kgc.closed_world_idxs
-        ow_idxs = self.kgc.open_world_idxs
-
-        # train uses the original embeddings
-        # (which also checks whether the targets tensor is correct)
-        if which is Evaluation.kgc_train:
-            idxs, projections = cw_idxs, self.targets
-
-        if which is Evaluation.kgc_transductive:
-            idxs, projections = cw_idxs, self.projections
-
-        if which is Evaluation.kgc_inductive:
-            idxs, projections = ow_idxs, self.projections
-
-        if which is Evaluation.kgc_test:
-            idxs, projections = ow_idxs, self.projections
-
-        # pykeen directly modifies the _embedding.weight.data
-        # https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L395
-
-        log.info(f"replacing {len(idxs)} embeddings for {which.value}")
-        new._embeddings.weight[idxs] = projections[idxs]
-
-    @contextmanager
-    def replace_embeddings(self, which: Evaluation):
-        old = self.cw_entity_embedding
-
-        # https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/models/unimodal/complex.py#L102
-        new = self.cw_entity_embedding.__class__(
-            max_id=self.kgc.num_embeddings,
-            shape=old.shape,
-            # https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/models/unimodal/complex.py#L106
-            dtype=torch.cfloat if old.is_complex else torch.get_default_dtype(),
-            regularizer=old.regularizer,
-            trainable=False,
-        )
-
-        new = new.to(device=self.device)
-
-        # always provide the closed-world embeddings
-        self._overwrite_embedding(Evaluation.kgc_train, new)
-        if which is not Evaluation.kgc_train:
-            self._overwrite_embedding(which, new)
-
-        self.kgc_model.model.entity_representations[0] = new
-
-        try:
-            yield
-
-        except Exception as exc:
-            log.error(f"kgc evaluation error: {exc}")
-
-        finally:
-            log.info("restoring original kgc model")
-            self.kgc_model.model.entity_representations[0] = old
+        super()._init_projections(total, dim)
 
     def evaluate_kgc(self, evaluator, which, **kwargs):
         model = self.kgc_model.model.to(device=self.device)
-        with self.replace_embeddings(which):
+        old = self.cw_entity_embedding
+        closed_world = self.targets
+
+        with self.replace_embeddings(which, model, old, closed_world):
             results = evaluator.evaluate(
                 model=model,
                 tqdm_kwargs=dict(
@@ -523,13 +592,16 @@ class Projector(Base):
 
         return results
 
-    # /kgc embedding shenanigans
+    def projection_error(self):
+        return self._projection_error(self.targets)
+
     # /projection management
     # ----------------------------------------
     # kgc model
 
     @property
     def kgc_embedding_dim(self) -> int:
+        # TODO use self.cw_entity_embedding.shape[0]
         # this returns 1000 for 500 dimensional complex embeddings
         return self.cw_entity_embedding.embedding_dim
 
@@ -626,41 +698,9 @@ class Projector(Base):
         self.update_projections(projections, reduced_samples)
 
     def on_fit_start(self):
-        print("\n\n")
-        print(self.kgc.description)
-        print()
-
-        print("\nFITTING\n")
-        log.info("starting to fit")
-
-        train = Evaluation.kgc_train
-        if train in self.evaluations:
-            self._kgc_train_results = self.run_kgc_evaluation(train)
-
-    def on_validation_epoch_end(self, *_):
-        log.info("validation epoch end")
-
-        self.gather_projections()
-
-        # log the average distance between projections
-        # and targets (somewhat of a validation loss)
-
-        if not self.global_step == 0:
-            error = self.projection_error()
-            self.log("training/projection_error", error)
-
-        # continuously log the baseline for a nice transductive plot
-        train = Evaluation.kgc_train
-        if train in self.evaluations:
-            self._log_kgc_results(train, self._kgc_train_results)
-
-        # run evaluations with projections
-        evaluations = {Evaluation.kgc_transductive, Evaluation.kgc_inductive}
-        for which in evaluations & self.evaluations:
-            results = self.run_kgc_evaluation(which)
-            self._log_kgc_results(which, results)
-
-        self.clear_projections()
+        log.error(f"move targets tensor to {self.device}")
+        self.targets = self.targets.to(device=self.device)
+        super().on_fit_start()
 
     # /lightning callbacks
     # ----------------------------------------
@@ -703,7 +743,7 @@ class Projector(Base):
     # /debugging and introspection
 
 
-class SingleAffineProjector(Projector):
+class SingleAffineProjector(KGCProjector):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -728,7 +768,7 @@ class SingleAffineProjector(Projector):
         # return torch.dist(projected, target, p=2) / projected.shape[0]
 
 
-class MultiAffineProjector(Projector):
+class MultiAffineProjector(KGCProjector):
 
     pooling: Literal["mean", "max"]
 
@@ -765,7 +805,7 @@ class MultiAffineProjector(Projector):
         flat = [sample.key for sample in samples]
 
         # e.g. given two entities and a batch_size of 5:
-        # (8, 8, 8, 7, 7) -> [(8, [0, 1, 2]), (7, [3, 4])]
+        # (8, 8, 8, 7, 7) -> [(8, [0, 1y, 2]), (7, [3, 4])]
         grouped = [
             (entity, [next(counter) for _ in grouper])
             for entity, grouper in groupby(flat)
@@ -785,88 +825,154 @@ class MultiAffineProjector(Projector):
         return self.loss(projected, target)
 
 
-class SingleComplexJoint(Base):
+#
+#   JOINT MODELS
+#
+
+
+class JointProjector(Projector):
+    pass
+
+
+class SingleComplexJoint(JointProjector):
 
     kgc: data.KGC
-
-    def _reset_embeddings(self):
-        log.info("resetting embeddings N(0, 1)")
-        for ember in (self.entities, self.relations):
-            torch.nn.init.normal_(ember.weight, mean=0.0, std=1.0)
-
-    def _init_embeddings(self):
-        # real and imaginary parts
-
-        self.relations = torch.nn.Embedding(
-            num_embeddings=len(self.irt2.relations),
-            embedding_dim=self.embedding_dim,
-        )
-
-        log.info("setup relation embedding of size {self.relations.shape}")
-
-        self.entities = torch.nn.Embedding(
-            num_embeddings=self.kgc.num_embeddings,
-            embedding_dim=self.embedding_dim,
-        )
-
-        log.info("setup entity embedding of size {self.entities.shape}")
 
     def __init__(
         self,
         irt2: IRT2,
+        config: dict,
         *args,
         embedding_dim: int = None,
+        regularizer: str,
+        regularizer_kwargs: dict,
         **kwargs,
     ):
-        super().__init__(irt2, *args, **kwargs)
-
-        # real + imag
-        embedding_dim = embedding_dim * 2
+        super().__init__(irt2, config, *args, **kwargs)
 
         self.project = torch.nn.Linear(
             in_features=self.encoder.config.hidden_size,
-            out_features=embedding_dim,
+            # https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L353
+            out_features=embedding_dim * 2,
         )
 
-        self.score = pykeen.nn.functional.complex_interaction
         self.loss = torch.nn.CrossEntropyLoss()
 
-        # noqa TODO assert is_complex
-        # noqa TODO add p2 regularizer (https://github.com/pykeen/pykeen/blob/70e46a8158e15f2d47ab1ac0cfac1ab0e8ae18bf/src/pykeen/regularizers.py#L148)
-
-        # num_entities = irt2.
-
-        self.entities = torch.nn.Embedding(
-            num_embeddings=self.kgc.closed_world_idxs.max().item() + 1,
+        self.scorer = pykeen.models.unimodal.ComplEx(
             embedding_dim=embedding_dim,
+            regularizer=regularizer,
+            regularizer_kwargs=regularizer_kwargs,
+            triples_factory=self.kgc.closed_world_dataset,
+            random_seed=config["seed"],
         )
 
-        self.relations = torch.nn.Embedding(
-            num_embeddings=len(irt2.relations),
-            embedding_dim=embedding_dim,
+        self.entities = self.scorer.entity_representations[0]
+        self.relations = self.scorer.relation_representations[0]
+
+        # self.score = pykeen.nn.functional.complex_interaction
+        log.info(f"initialized triple scorer: {self.scorer.interaction}")
+
+        log.info(
+            f"initialized >[entity]< embedding: "
+            f"{self.entities.max_id} x {self.entities.shape[0]}"
         )
 
-        log.info(f"initialized >[entity]< embedding: {self.entities.weight.shape}")
-        log.info(f"initialized >[relation]< embedding: {self.relations.weight.shape}")
+        log.info(
+            f"initialized >[relation]< embedding: "
+            f"{self.relations.max_id} x {self.relations.shape[0]}"
+        )
 
-        self._reset_embeddings()
+        self._init_projections(
+            total=self.kgc.num_embeddings,
+            dim=embedding_dim,
+            dtype=torch.cfloat,
+        )
 
     def _forward_directed(
         self,
         idxs: torch.Tensor,  # B x tokens
         er: torch.Tensor,  # B x 2
         kind: Literal["hr", "tr"],
+        samples: list,
     ):
-        # view_as_complex: N x D x 2 -> N x D
-        # view_as_real:    N x D -> N x D x 2
-        complex = torch.view_as_complex
+        if len(idxs) == 0:
+            assert samples == []
+            return [self.void_c] * 3, self.void_c, tuple()
 
         # hr -> target head idx, rel idx
         # tr -> target tail idx, rel idx
         assert kind in {"hr", "tr"}
 
         B = idxs.shape[0]
-        E = self.entities.num_embeddings
+        E = self.entities.max_id
+
+        encs, samples = self._forward_project((idxs, samples))
+
+        # batch x embedding_dims
+        ents = self.entities(None)  # gets all
+        rels = self.relations(er[:, 1])
+
+        # batch x num_entities x embedding_dim
+        e, r = (
+            # for E = 3:
+            # [0, 1, 2] -> [0, 0, 0, 1, 1, 1, 2, 2, 2]
+            x.repeat_interleave(E, dim=0).view(B, E, -1)
+            for x in (encs, rels)
+        )
+
+        # batch x num_entities x embedding_dim
+        y = torch.stack([ents for _ in range(B)])
+
+        h, r, t = (e, r, y) if kind == "tr" else (y, r, e)
+        return (h, r, t), encs, samples
+
+    def training_step(
+        self,
+        collation: tuple[Tensor, list[data.TripleSample]],
+        batch_idx,
+    ):
+        # th, tt: batch x tokens
+        # hr, tr: batch x 2
+        th, hr, h_samples, tt, tr, t_samples = collation
+
+        # if not batch_idx or not h_samples or not t_samples:
+        #     breakpoint()
+
+        x_h, h_encs, h_samples = self._forward_directed(th, hr, "hr", h_samples)
+        x_t, t_encs, t_samples = self._forward_directed(tt, tr, "tr", t_samples)
+
+        # h, r, t: batch x num_entities x embedding_dim
+        # samples: batch
+        # encs: batch x embedding_dim
+        h, r, t = list(map(torch.cat, zip(x_h, x_t)))
+        samples = h_samples + t_samples
+        encs = torch.cat((h_encs, t_encs))
+
+        # score them triples
+        # batch x num_entities
+        scores = self.scorer.interaction(h, r, t)
+        targets = torch.cat(
+            (
+                hr[:, 0] if len(hr) else self.void_i,
+                tr[:, 0] if len(tr) else self.void_i,
+            )
+        )
+
+        loss = self.loss(scores, targets)
+        self.log("training/loss", loss)
+
+        self.update_projections(encs, samples)
+        return loss
+
+    # --
+
+    def _forward_project(self, collation):
+        idxs, samples = collation
+        B = idxs.shape[0]
+
+        # view_as_complex: N x D x 2 -> N x D
+        # view_as_real:    N x D -> N x D x 2
+        complex = torch.view_as_complex
 
         # batch x text_dims
         encs = self.encode(idxs)[:, 0]
@@ -874,58 +980,47 @@ class SingleComplexJoint(Base):
         # batch x embedding_dims
         encs = complex(self.project(encs).view(B, -1, 2))
 
-        # batch x embedding_dims
-        rels = complex(self.entities(er[:, 0]).view((B, -1, 2)))
+        return encs, samples
 
-        # batch x num_entities x embedding_dim
-        e, r = (
-            # [0, 1, 2] -> [0, 0, 0, 1, 1, 1, 2, 2, 2]
-            x.repeat_interleave(E, dim=0).view(B, E, -1)
-            for x in (encs, rels)
-        )
-
-        # batch x num_entities x embedding_dim
-        y = torch.stack(
-            [complex(self.entities.weight.view(E, -1, 2)) for _ in range(B)]
-        )
-
-        # eerie or ire
-        return (e, r, y) if kind == "tr" else (y, r, e)
-
-    def forward(self, collation: tuple[Tensor, list[data.TripleSample]]):
-        # th, tt: batch x tokens
-        # hr, tr: batch x 2
-        th, hr, h_samples, tt, tr, t_samples = collation
-
-        # triple: batch x num_entities x embedding_dim
-        x_h = self._forward_directed(th, hr, kind="hr")
-        x_t = self._forward_directed(tt, tr, kind="tr")
-
-        h, r, t = list(map(torch.cat, zip(x_h, x_t)))
-
-        # do some triple scoring magic
-        scores = self.score(h, r, t)
-        targets = torch.cat((hr[:, 1], tr[:, 1]))
-
-        loss = self.loss(scores, targets)
-        self.log("training/loss", loss)
-
-    def evaluate_kgc(self, evaluator, which, **kwargs):
-        raise NotImplementedError()
-
-    def training_step(
+    def validation_step(
         self,
         collation: tuple[Tensor, list[data.ProjectorSample]],
         batch_idx,
     ):
-        self.forward(collation)
+        projections, samples = self._forward_project(collation)
+        self.update_projections(projections, samples)
 
-    # def validation_step(
-    #     self,
-    #     collation: tuple[Tensor, list[data.ProjectorSample]],
-    #     batch_idx,
-    # ):
-    #     pass
+    # --
+
+    def evaluate_kgc(self, evaluator, which, **kwargs):
+        model = self.scorer
+        old = self.entities
+        closed_world = self.entities._embeddings.weight
+
+        with self.replace_embeddings(which, model, old, closed_world):
+            results = evaluator.evaluate(
+                model=model,
+                tqdm_kwargs=dict(
+                    leave=False,
+                    ncols=data.TERM_WIDTH,
+                    file=sys.stdout,
+                ),
+                **kwargs,
+            )
+
+        return results
+
+    def projection_error(self):
+        return self._projection_error(self.entities(None))
+
+    def on_fit_start(self):
+        super().on_fit_start()
+
+        # empty tensors to avoid control structures around
+        # head/tail partitions (e.g. see self.training_step)
+        self.void_i = torch.zeros(0).to(device=self.device, dtype=torch.int)
+        self.void_f = torch.zeros(0).to(device=self.device, dtype=torch.float)
+        self.void_c = torch.zeros(0).to(device=self.device, dtype=torch.cfloat)
 
 
 MODELS = {
