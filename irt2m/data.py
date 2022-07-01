@@ -162,8 +162,9 @@ class KGC:
         """Special extra dataset containing only closed-world vertices."""
         old = self.dataset.training
         triples = old.mapped_triples
+        max_id = triples[:, (0, 2)].max().item()
 
-        e2id = {self.idx2str[v]: v for v in triples[:, (0, 2)].ravel().tolist()}
+        e2id = {self.idx2str.get(i, f"unused [{i}]"): i for i in range(max_id + 1)}
 
         new = pykeen.triples.TriplesFactory.create(mapped_triples=triples)
         new = new.with_labels(
