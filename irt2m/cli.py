@@ -6,19 +6,32 @@ import os
 
 import click
 import pretty_errors
+import torch
+from pudb.var_view import default_stringifier as pudb_str
 
 import irt2m
 from irt2m import eval, train
 
-irt2m.init_logging()
-
-
 # ---
+
 
 log = logging.getLogger(__name__)
 
-os.environ["PYTHONBREAKPOINT"] = "pudb.set_trace"
 # os.environ["PYTHONBREAKPOINT"] = "ipdb.set_trace"
+os.environ["PYTHONBREAKPOINT"] = "pudb.set_trace"
+
+
+# To better render tensors and to avoid cluttering
+# the logfile with len() of zero-length tensor exceptions
+# Register with Ctl-P -> Variable Stringifier -> Custom
+# and enter the path to this file
+def pudb_stringifier(obj):
+    if isinstance(obj, torch.Tensor):
+        dtype = str(obj.dtype).split(".")[1]
+        dims = " x ".join(map(str, obj.shape))
+        return f"Tensor({dtype}) {dims}"
+
+    return pudb_str(obj)
 
 
 pretty_errors.configure(
@@ -28,8 +41,13 @@ pretty_errors.configure(
 )
 
 
+# ---
+
+
 @click.group()
 def main():
+    irt2m.init_logging()
+
     """Use irt2m from the command line."""
     log.info(f"\n\n{irt2m.banner}\n")
     log.info(f"initialized root path: {irt2m.ENV.DIR.ROOT}")
