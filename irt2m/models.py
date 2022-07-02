@@ -938,6 +938,9 @@ class JointProjector(Projector):
 
         # batch x embedding_dims
         encs, samples = self._forward_project((idxs, samples))
+        # encs = self.entities(
+        #     torch.LongTensor([s.key for s in samples]).to(device=self.device),
+        # )
 
         # batch x embedding_dims
         ents = self.entities(None)  # gets all
@@ -954,7 +957,9 @@ class JointProjector(Projector):
         # batch x num_entities x embedding_dim
         y = torch.stack([ents for _ in range(B)])
 
-        h, r, t = (e, r, y) if kind == "tr" else (y, r, e)
+        # hr: head is text (encs), er saves (tail, relation)
+        # tr: tail is text (ecns), er saves (head, relation)
+        h, r, t = (e, r, y) if kind == "hr" else (y, r, e)
         return (h, r, t), encs, samples
 
     def _subbatch(self, collation):
@@ -1013,14 +1018,24 @@ class JointProjector(Projector):
                 )
             )
 
-            loss = self.loss(scores, targets)
-            losses.append(loss)
+            score_loss = self.loss(scores, targets)
+            reg_loss = self.scorer.collect_regularization_term()
 
+            loss = score_loss + reg_loss
+            losses.append(loss.detach() / len(samples))
+
+            # accumulate
             self.manual_backward(loss)
             self.update_projections(encs, samples)
 
+            # applies constraints
+            self.scorer.post_forward_pass()
+
         optimizer.step()
         optimizer.zero_grad()
+
+        # applies constraints
+        self.scorer.post_parameter_update()
 
         loss = torch.stack(losses).mean()
         self.log("training/loss", loss)
@@ -1070,6 +1085,8 @@ class JointProjector(Projector):
         self.void_c = torch.zeros(0).to(device=self.device, dtype=torch.cfloat)
 
         # PyKEEN related initialization
+        # this initializes the embeddings
+        self.scorer.reset_parameters_()
 
     def on_validation_epoch_end(self, *args):
         if self.global_step:
