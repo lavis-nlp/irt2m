@@ -28,8 +28,15 @@ os.environ["PYTHONBREAKPOINT"] = "pudb.set_trace"
 def pudb_stringifier(obj):
     if isinstance(obj, torch.Tensor):
         dtype = str(obj.dtype).split(".")[1]
-        dims = " x ".join(map(str, obj.shape))
-        return f"Tensor({dtype}) {dims}"
+
+        if not obj.numel():
+            suffix = "empty"
+        elif obj.numel() == 1:
+            suffix = f"value: {obj.item()}"
+        else:
+            suffix = "dims: " + " x ".join(map(str, obj.shape))
+
+        return f"Tensor({dtype}) {suffix}"
 
     return pudb_str(obj)
 
@@ -138,6 +145,27 @@ def train_kgc(**kwargs):
     default=None,
     required=False,
     help="whether to mask the mention in the text contexts",
+)
+@click.option(
+    "--learning-rate",
+    type=float,
+    default=None,
+    required=False,
+    help="overwrites learning rate",
+)
+@click.option(
+    "--regularizer-weight",
+    type=float,
+    default=None,
+    required=False,
+    help="overwrites embedding regularizer weight",
+)
+@click.option(
+    "--weight-decay",
+    type=float,
+    default=None,
+    required=False,
+    help="overwrites the optimizers' weight-decay",
 )
 def train_projector(**kwargs):
     """Train a projector that maps text to KGC vertices."""

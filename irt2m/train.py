@@ -411,10 +411,10 @@ def _init_callbacks(config, debug):
         pl.callbacks.LearningRateMonitor(logging_interval="step"),
     ]
 
-    if "early_stopping" in config:
+    if "early_stopping" in config and config["early_stopping"]:
         log.info("add early stopping callback")
         EarlyStopping = pl.callbacks.early_stopping.EarlyStopping
-        callbacks.append(EarlyStopping(**config["early_stopping"]))
+        callbacks.append(EarlyStopping(**config["early_stopping_kwargs"]))
 
     return callbacks
 
@@ -426,6 +426,9 @@ def _overwrite_config(config, **overwrites):
         ("masked", "module.train_ds_kwargs.masking"),
         ("masked", "module.valid_ds_kwargs.masking"),
         ("epochs", "trainer.max_epochs"),
+        ("learning_rate", "optimizer_kwargs.lr"),
+        ("regularizer_weight", "model_kwargs.regularizer_kwargs.weight"),
+        ("weight_decay", "optimizer_kwargs.weight_decay"),
     ]
 
     for key, trail in mapping:

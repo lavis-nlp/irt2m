@@ -8,6 +8,14 @@ model_kwargs:
     weight: 0.1
     normalize: true
 
+early_stopping: true
+early_stopping_kwargs:
+  min_delta: 0.001
+  patience: 5
+  mode: max
+  monitor: kgc/inductive/hits@10
+
+
 # for available datasets see irt2m.data.PROJECTOR_DATASETS
 #   and their respective __init__ methods for *ds_kwargs
 #
@@ -21,12 +29,13 @@ module:
     max_contexts_per_sample: 1
   train_loader_kwargs:
     shuffle: true
-    batch_size: 5
+    batch_size: 4
 
   valid_ds: mention flat
   valid_ds_kwargs:
     seed: 5012022
-    max_contexts_per_sample: 100
+    contexts_per_sample: 1
+    max_contexts_per_sample: 1
   valid_loader_kwargs:
     shuffle: false
     batch_size: 30
@@ -34,5 +43,5 @@ module:
 # for available optimizers see irt2m.models.OPTIMIZERS
 optimizer: adam
 optimizer_kwargs:
-  lr: 5.0e-05
+  lr: 5.0e-5
   weight_decay: 0.1
