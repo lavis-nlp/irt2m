@@ -214,7 +214,7 @@ def kgc(
     log.info(f"writing additional logfile at {logpath}")
 
     pkds = data.PyKEEN.from_irt2(
-        dataset=irt2,
+        irt2=irt2,
         ratio=conf["ratio"],
         seed=conf["dataset seed"],
     )
