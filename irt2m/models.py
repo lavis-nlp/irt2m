@@ -289,7 +289,7 @@ class Projector(pl.LightningModule):
 
     def run_kgc_evaluation(self, which: Evaluation) -> dict:
         # print(f"\n\n\nevaluate {which.value} {datetime.now()}\n")
-        # log.info(f"running >[{which.value}]< evaluation")
+        log.info(f"running >[{which.value}]< evaluation")
 
         dataset = self.kgc.dataset
 
@@ -448,8 +448,8 @@ class Projector(pl.LightningModule):
     def on_fit_end(self):
         log.info("finished fitting")
 
-    def on_train_start(self):
-        log.info("starting training")
+    # def on_train_start(self):
+    #     log.info("starting training")
 
     def on_train_epoch_start(self):
         log.info(f"starting training >[epoch {self.current_epoch}]<")
@@ -469,32 +469,23 @@ class Projector(pl.LightningModule):
         print("\nFITTING\n")
         log.info("starting to fit")
 
-        train = Evaluation.kgc_train
-        if train in self.evaluations:
-            self._kgc_train_results = self.run_kgc_evaluation(train)
-
     def on_validation_epoch_end(self, *_):
         log.info("validation epoch end")
 
         self.gather_projections()
 
-        # log the average distance between projections
-        # and targets (somewhat of a validation loss)
+        if self.global_step:
 
-        if not self.global_step == 0:
+            # log the average distance between projections
+            # and targets (somewhat of a validation loss)
             error = self.projection_error()
             self.log("training/projection_error", error)
 
-        # continuously log the baseline for a nice transductive plot
-        train = Evaluation.kgc_train
-        if train in self.evaluations:
-            self._log_kgc_results(train, self._kgc_train_results)
-
-        # run evaluations with projections
-        evaluations = {Evaluation.kgc_transductive, Evaluation.kgc_inductive}
-        for which in evaluations & self.evaluations:
-            results = self.run_kgc_evaluation(which)
-            self._log_kgc_results(which, results)
+            # run evaluations with projections
+            evaluations = {Evaluation.kgc_transductive, Evaluation.kgc_inductive}
+            for which in evaluations & self.evaluations:
+                results = self.run_kgc_evaluation(which)
+                self._log_kgc_results(which, results)
 
         self.clear_projections()
 
@@ -742,6 +733,20 @@ class KGCProjector(Projector):
         log.error(f"move targets tensor to {self.device}")
         self.targets = self.targets.to(device=self.device)
         super().on_fit_start()
+
+        train = Evaluation.kgc_train
+        if train in self.evaluations:
+            self._kgc_train_results = self.run_kgc_evaluation(train)
+
+    def on_validation_epoch_end(self, *args):
+        if self.global_step:
+
+            # continuously log the baseline for a nice transductive plot
+            train = Evaluation.kgc_train
+            if train in self.evaluations:
+                self._log_kgc_results(train, self._kgc_train_results)
+
+        super().on_validation_epoch_end(*args)
 
     # /lightning callbacks
     # ----------------------------------------
@@ -1063,6 +1068,18 @@ class JointProjector(Projector):
         self.void_i = torch.zeros(0).to(device=self.device, dtype=torch.int)
         self.void_f = torch.zeros(0).to(device=self.device, dtype=torch.float)
         self.void_c = torch.zeros(0).to(device=self.device, dtype=torch.cfloat)
+
+        # PyKEEN related initialization
+
+    def on_validation_epoch_end(self, *args):
+        if self.global_step:
+            # continuously log the trained embeddings performance
+            train = Evaluation.kgc_train
+            if train in self.evaluations:
+                results = self.run_kgc_evaluation(train)
+                self._log_kgc_results(train, results)
+
+        super().on_validation_epoch_end(*args)
 
 
 class SingleComplexJoint(JointProjector):
