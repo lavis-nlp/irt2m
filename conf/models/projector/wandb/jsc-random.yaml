@@ -1,0 +1,47 @@
+# use the wandb agent to run the sweep
+# goal: ablation over different context sizes
+name: JSC Random
+description: First JSC random search
+project: irt2-projector
+
+method: random
+metric:
+  name: kgc/inductive/hits@10
+  goal: maximize
+
+parameters:
+  masked:
+    values:
+    - true
+    - false
+
+  max-contexts-per-sample:
+    values:
+      - 1
+      - 10
+      - 100
+
+  learning-rate:
+    distribution: uniform
+    min: 1e-6
+    max: 1e-5
+
+  regularizer-weight:
+    distribution: log_uniform_values
+    min: 0.001
+    max: 1
+
+  weight-decay:
+    distribution: log_uniform_values
+    min: 0.001
+    max: 0.5
+
+
+program: irt2m
+command:
+  - ${program}
+  - train
+  - projector
+  - --config=conf/models/projector/base.yaml
+  - --config=conf/models/projector/models/multi-affine-projector.yaml
+  - ${args}
