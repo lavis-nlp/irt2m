@@ -453,7 +453,7 @@ class Projector(pl.LightningModule):
 
     def on_train_epoch_start(self):
         log.info(f"starting training >[epoch {self.current_epoch}]<")
-        self.log("trainer/global_epoch", self.current_epoch)
+        self.log("trainer/epoch", self.current_epoch)
 
     def on_train_epoch_end(self):
         log.info(f"training epoch {self.current_epoch} ended")
@@ -918,49 +918,34 @@ class JointProjector(Projector):
 
         return encs, samples
 
-    def _forward_directed(
-        self,
-        idxs: torch.Tensor,  # B x tokens
-        er: torch.Tensor,  # B x 2
-        kind: Literal["hr", "tr"],
-        samples: list,
-    ):
-        if len(idxs) == 0:
-            assert samples == []
-            return [self.void_c] * 3, self.void_c, tuple()
+    def _forward_directed(self, kind: Literal["head", "tail"], idxs, er, samples):
+        if not samples:
+            return self.void_f, self.void_c, tuple()
 
-        # hr -> target head idx, rel idx
-        # tr -> target tail idx, rel idx
-        assert kind in {"hr", "tr"}
-
-        B = idxs.shape[0]
-        E = self.entities.max_id
+        # if kind == head: heads are encoded text
+        # if kind == tail: tails are encoded text
 
         # batch x embedding_dims
         encs, samples = self._forward_project((idxs, samples))
-        # encs = self.entities(
-        #     torch.LongTensor([s.key for s in samples]).to(device=self.device),
-        # )
+        # >> TBR
+        # idxs = [s.key for s in samples]
+        # encs = self.entities(torch.LongTensor(idxs).to(device=self.device))
+        # << TBR
 
         # batch x embedding_dims
-        ents = self.entities(None)  # gets all
         rels = self.relations(er[:, 1])
+        ents = self.entities(None)
 
-        # batch x num_entities x embedding_dim
-        e, r = (
-            # for E = 3:
-            # [0, 1, 2] -> [0, 0, 0, 1, 1, 1, 2, 2, 2]
-            x.repeat_interleave(E, dim=0).view(B, E, -1)
-            for x in (encs, rels)
-        )
+        assert kind in {"head", "tail"}
+        if kind == "head":
+            score = self.scorer.interaction.score_t
+            scores = score(h=encs, r=rels, all_entities=ents)
+        if kind == "tail":
+            score = self.scorer.interaction.score_h
+            scores = score(t=encs, r=rels, all_entities=ents)
 
-        # batch x num_entities x embedding_dim
-        y = torch.stack([ents for _ in range(B)])
-
-        # hr: head is text (encs), er saves (tail, relation)
-        # tr: tail is text (ecns), er saves (head, relation)
-        h, r, t = (e, r, y) if kind == "hr" else (y, r, e)
-        return (h, r, t), encs, samples
+        # scores: batch x num_entities
+        return scores, encs, samples
 
     def _subbatch(self, collation):
         # take the head and tail parts separately
@@ -990,27 +975,33 @@ class JointProjector(Projector):
         collation: tuple[Tensor, list[data.TripleSample]],
         batch_idx,
     ):
-        losses = []
+        losses, reg_losses, score_losses = [], [], []
+
         optimizer = self.optimizers()
 
         for subcollation in self._subbatch(collation):
             # th, tt: batch x tokens (int)
             # hr, tr: batch x 2 (int)
-            th, hr, h_samples, tt, tr, t_samples = subcollation
+            h_idxs, hr, h_samples, t_idxs, tr, t_samples = subcollation
 
-            x_h, h_encs, h_samples = self._forward_directed(th, hr, "hr", h_samples)
-            x_t, t_encs, t_samples = self._forward_directed(tt, tr, "tr", t_samples)
+            # x: tuple of batch x embedding_dim
+            h_scores, h_encs, h_samples = self._forward_directed(
+                kind="head",
+                idxs=h_idxs,
+                er=hr,
+                samples=h_samples,
+            )
 
-            # h, r, t: batch x num_entities x embedding_dim
-            # samples: batch
-            # encs: batch x embedding_dim
-            h, r, t = list(map(torch.cat, zip(x_h, x_t)))
+            t_scores, t_encs, t_samples = self._forward_directed(
+                kind="tail",
+                idxs=t_idxs,
+                er=tr,
+                samples=t_samples,
+            )
+
             samples = h_samples + t_samples
             encs = torch.cat((h_encs, t_encs))
-
-            # score them triples
-            # batch x num_entities
-            scores = self.scorer.interaction(h, r, t)
+            scores = torch.cat((h_scores, t_scores))
             targets = torch.cat(
                 (
                     hr[:, 0] if len(hr) else self.void_i,
@@ -1019,10 +1010,13 @@ class JointProjector(Projector):
             )
 
             score_loss = self.loss(scores, targets)
+            score_losses.append(score_loss)
+
             reg_loss = self.scorer.collect_regularization_term()
+            reg_losses.append(reg_loss)
 
             loss = score_loss + reg_loss
-            losses.append(loss.detach() / len(samples))
+            losses.append(loss)
 
             # accumulate
             self.manual_backward(loss)
@@ -1037,8 +1031,20 @@ class JointProjector(Projector):
         # applies constraints
         self.scorer.post_parameter_update()
 
-        loss = torch.stack(losses).mean()
-        self.log("training/loss", loss)
+        self.log(
+            "training/loss",
+            torch.stack(losses).mean(),
+            on_step=True,
+            on_epoch=True,
+        )
+        self.log(
+            "training/loss-scoring",
+            torch.stack(score_losses).mean(),
+        )
+        self.log(
+            "training/loss-regularizer",
+            torch.stack(reg_losses).mean(),
+        )
 
         return loss
 
@@ -1084,8 +1090,7 @@ class JointProjector(Projector):
         self.void_f = torch.zeros(0).to(device=self.device, dtype=torch.float)
         self.void_c = torch.zeros(0).to(device=self.device, dtype=torch.cfloat)
 
-        # PyKEEN related initialization
-        # this initializes the embeddings
+        # this initializes the embeddings based on the kwargs
         self.scorer.reset_parameters_()
 
     def on_validation_epoch_end(self, *args):
