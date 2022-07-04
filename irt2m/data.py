@@ -38,17 +38,6 @@ tqdm = partial(_tqdm, ncols=TERM_WIDTH)
 Config = dict
 
 
-def dotrslv(dic, keychain, skiplast: Optional[int] = 0):
-    "foo.bar.baz -> dic['foo']['bar']['baz']"
-
-    try:
-        for key in keychain.split(".")[:-skiplast]:
-            dic = dic[key]
-        return dic
-    except KeyError:
-        return None
-
-
 # TODO use pykeen.datasets.EagerDataset
 @dataclass
 class PyKEEN:

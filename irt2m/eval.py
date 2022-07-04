@@ -15,6 +15,7 @@ import torch
 import torch.utils.data as td
 import yaml
 from irt2.dataset import IRT2
+from ktz.collections import drslv as _drslv
 from ktz.filesystem import path as kpath
 from tabulate import tabulate
 from tqdm import tqdm as _tqdm
@@ -24,6 +25,7 @@ from irt2m import data, models
 
 log = logging.getLogger(__name__)
 tqdm = partial(_tqdm, ncols=data.TERM_WIDTH)
+drslv = partial(_drslv, sep=".")
 
 
 def hits(dic, k):
@@ -268,6 +270,8 @@ def init_projections(
 
 
 def run_kgc_evaluation(source, model, force: bool):
+    # both run pykeen and irt2 evaluations
+
     cache = kpath(source / "eval", create=True) / "kgc_results.yaml"
 
     if not force and cache.exists():
@@ -355,9 +359,9 @@ def projector(
         rows.append(
             (
                 which,
-                data.dotrslv(result, "both.realistic.hits_at_1"),
-                data.dotrslv(result, "both.realistic.hits_at_5"),
-                data.dotrslv(result, "both.realistic.hits_at_10"),
+                drslv(result, "both.realistic.hits_at_1"),
+                drslv(result, "both.realistic.hits_at_5"),
+                drslv(result, "both.realistic.hits_at_10"),
             )
         )
 
@@ -389,17 +393,17 @@ def create_report(folder: str):
             print(f"skipping {source}: not evaluated yet")
 
         result_row = {
-            "train h@1": "kgc/train.both.realistic.hits_at_1",
-            "train h@10": "kgc/train.both.realistic.hits_at_10",
-            "transductive h@1": "kgc/transductive.both.realistic.hits_at_1",
-            "transductive h@10": "kgc/transductive.both.realistic.hits_at_10",
-            "inductive h@1": "kgc/inductive.both.realistic.hits_at_1",
-            "inductive h@10": "kgc/inductive.both.realistic.hits_at_10",
-            "test h@1": "kgc/test.both.realistic.hits_at_1",
-            "test h@10": "kgc/test.both.realistic.hits_at_10",
+            "pykeen train h@1": "kgc/train.both.realistic.hits_at_1",
+            "pykeen train h@10": "kgc/train.both.realistic.hits_at_10",
+            "pykeen transductive h@1": "kgc/transductive.both.realistic.hits_at_1",
+            "pykeen transductive h@10": "kgc/transductive.both.realistic.hits_at_10",
+            "pykeen inductive h@1": "kgc/inductive.both.realistic.hits_at_1",
+            "pykeen inductive h@10": "kgc/inductive.both.realistic.hits_at_10",
+            "pykeen test h@1": "kgc/test.both.realistic.hits_at_1",
+            "pykeen test h@10": "kgc/test.both.realistic.hits_at_10",
         }
 
-        row |= {k: data.dotrslv(result.kgc_results, v) for k, v in result_row.items()}
+        row |= {k: drslv(result.kgc_results, v) for k, v in result_row.items()}
 
         config_row = {
             "prefix": "prefix",
@@ -411,7 +415,7 @@ def create_report(folder: str):
             "epochs": "trainer.max_epochs",
         }
 
-        row |= {k: data.dotrslv(result.config, v) for k, v in config_row.items()}
+        row |= {k: drslv(result.config, v) for k, v in config_row.items()}
 
         for k in 1, 10:
             for kind in "inductive", "transductive":
