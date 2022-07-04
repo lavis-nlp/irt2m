@@ -271,19 +271,19 @@ class KGC:
             )
 
         def build_tripleset(head_task, tail_task):
-            heads = set(
+            tail_task_triples = set(
                 (mid2idx[mid], rid, vid)
-                for mid, rid, vid in triples(head_task)
-                if vid not in open_vids
-            )
-
-            tails = set(
-                (vid, rid, mid2idx[mid])
                 for mid, rid, vid in triples(tail_task)
                 if vid not in open_vids
             )
 
-            return heads | tails
+            head_task_triples = set(
+                (vid, rid, mid2idx[mid])
+                for mid, rid, vid in triples(head_task)
+                if vid not in open_vids
+            )
+
+            return tail_task_triples | head_task_triples
 
         # htr -> hrt as pykeen requires
         train_triples = {(h, r, t) for h, t, r in irt2.closed_triples}
