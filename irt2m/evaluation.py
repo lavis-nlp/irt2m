@@ -28,11 +28,20 @@ tqdm = partial(_tqdm, ncols=data.TERM_WIDTH)
 drslv = partial(_drslv, sep=".")
 
 
+# --
+
+
 def hits(dic, k):
     try:
         return dic["both"]["realistic"][f"hits_at_{k}"]
     except KeyError:
         return 0.0
+
+
+def _apply_backports(config: dict):
+    # set defaults for missing options in older models
+    if "mode" not in config:
+        config["mode"] = "full"
 
 
 # TODO move classes like these to data?
@@ -104,6 +113,7 @@ class ProjectorResult:
 
         with (path / "config.yaml").open(mode="r") as fd:
             self.config = yaml.safe_load(fd)
+            _apply_backports(self.config)
 
         # load all validation results (which were PyKEEN RankingResults)
         self.validation = {"train": {}, "transductive": {}, "inductive": {}}
@@ -272,7 +282,7 @@ def init_projections(
 def run_kgc_evaluation(source, model, force: bool):
     # both run pykeen and irt2 evaluations
 
-    cache = kpath(source / "eval", create=True) / "kgc_results.yaml"
+    cache = kpath(source / "eval", create=True) / "metrics.yaml"
 
     if not force and cache.exists():
         print("loading results from cache")
@@ -285,6 +295,8 @@ def run_kgc_evaluation(source, model, force: bool):
     print("cache miss! running kgc evaluation")
 
     evaluations = [
+        models.Evaluation.irt2_inductive,
+        models.Evaluation.irt2_test,
         models.Evaluation.kgc_train,
         models.Evaluation.kgc_transductive,
         models.Evaluation.kgc_inductive,
@@ -294,7 +306,7 @@ def run_kgc_evaluation(source, model, force: bool):
     results = {}
     for which in evaluations:
         res = model.run_kgc_evaluation(which)
-        results[which.value] = res.to_dict()
+        results[which.key] = res.to_dict()
 
     with cache.open(mode="w") as fd:
         yaml.safe_dump(results, fd)
@@ -320,7 +332,10 @@ def projector(
     print(textwrap.indent(str(result.description), prefix))
     print()
 
+    print("TODO load best checkpoint")
     assert checkpoint, "TODO load best checkpoint"
+
+    result.config["mode"] = "probe"
 
     # initialize model and data
 
@@ -328,6 +343,7 @@ def projector(
     device = torch.device("cuda")
 
     model = model.to(device=device)
+    model.ensure_device()
     model.eval()
 
     if batch_size is None:
@@ -354,20 +370,56 @@ def projector(
     )
 
     rows = []
-    for which in ["kgc/train", "kgc/transductive", "kgc/inductive", "kgc/test"]:
-        result = results[which]
+
+    # irt2
+
+    ordered = [
+        eval.key
+        for eval in [
+            models.Evaluation.irt2_inductive,
+            models.Evaluation.irt2_test,
+        ]
+    ]
+
+    for key in ordered:
+        result = results[key]
+        prefix = "all.micro"
         rows.append(
             (
-                which,
-                drslv(result, "both.realistic.hits_at_1"),
-                drslv(result, "both.realistic.hits_at_5"),
-                drslv(result, "both.realistic.hits_at_10"),
+                key,
+                drslv(result, f"{prefix}.hits_at_1"),
+                drslv(result, f"{prefix}.hits_at_10"),
+                drslv(result, f"{prefix}.mrr"),
+            )
+        )
+
+    # pykeen
+
+    ordered = [
+        eval.key
+        for eval in [
+            models.Evaluation.kgc_train,
+            models.Evaluation.kgc_transductive,
+            models.Evaluation.kgc_inductive,
+            models.Evaluation.kgc_test,
+        ]
+    ]
+
+    for key in ordered:
+        result = results[key]
+        prefix = "both.realistic"
+        rows.append(
+            (
+                key,
+                drslv(result, f"{prefix}.hits_at_1") * 100,
+                drslv(result, f"{prefix}.hits_at_10") * 100,
+                drslv(result, f"{prefix}.inverse_harmonic_mean_rank") * 100,
             )
         )
 
     table = tabulate(
         rows,
-        headers=["", "h@1", "h@5", "h@10"],
+        headers=["", "both h@1", "both h@10", "both mrr"],
         floatfmt="2.3f",
     )
 

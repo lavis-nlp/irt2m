@@ -9,6 +9,8 @@ from itertools import count, groupby, zip_longest
 from pathlib import Path
 from typing import Literal
 
+import irt2.evaluation
+import numpy as np
 import pykeen.datasets
 import pykeen.evaluation
 import pykeen.models
@@ -17,8 +19,10 @@ import torch
 import transformers as tf
 import yaml
 from irt2.dataset import IRT2
+from irt2.types import MID, RID, VID
 from ktz.filesystem import path as kpath
 from torch import Tensor
+from tqdm import tqdm
 
 import irt2m
 from irt2m import data
@@ -82,20 +86,187 @@ def f_reduce_multi(
 
 class Evaluation(enum.Enum):
 
-    # closed world embeddings
+    # train:         closed world   embeddings   (train split)
+    # transductive:  closed world   projections  (train split)
+    # inductive:     open world     projections  (validation split)
+    # test:          open world     projections  (test split)
+
+    # irt2 ------------
+
+    irt2_inductive = "irt2/inductive"
+    irt2_test = "irt2/test"
+
+    # pykeen ----------
+
     kgc_train = "kgc/train"
-
-    # closed world projections
     kgc_transductive = "kgc/transductive"
-
-    # open world (validation split) projections
     kgc_inductive = "kgc/inductive"
-
-    # open world (test split) projections
     kgc_test = "kgc/test"
 
+    @property
+    def split(self):
+        return self.value.split("/")[1]
 
-# not using abc to avoid multi-inheritance
+    @property
+    def evaluator(self):
+        return self.value.split("/")[0]
+
+    @property
+    def key(self):
+        return self.value.replace("/", "_")
+
+
+# --
+# bridge to irt2 and mimicking the pykeen evaluator
+
+
+class IRT2Metrics(dict):
+    def to_dict(self):
+        return dict(self)
+
+
+class IRT2Evaluator:
+
+    irt2: IRT2
+    kgc: data.KGC
+    which: Evaluation
+    batch_size: int
+
+    task_ht: tuple[tuple[MID, RID], set[VID]]
+    candidates: tuple[VID]
+
+    def __init__(self, irt2, kgc, which: Evaluation, batch_size: int = 64):
+        log.info(f"initialize IRT2 evaluator for >[{which.value}]<")
+
+        self.irt2 = irt2
+        self.kgc = kgc
+        self.which = which
+        self.batch_size = batch_size
+
+        # task mids need to be id-mapped to the embedding indexes
+        def map2idx(task):
+            return {
+                (self.kgc.mid2idx[mid], rid): vids for (mid, rid), vids in task.items()
+            }
+
+        # original mids for use by evaluate()
+        self.task_ht = {
+            Evaluation.irt2_inductive: (
+                irt2.open_kgc_val_heads,
+                irt2.open_kgc_val_tails,
+            ),
+            Evaluation.irt2_test: (
+                irt2.open_kgc_test_heads,
+                irt2.open_kgc_test_tails,
+            ),
+        }[which]
+
+        # mapped to embedding indexes for use by _run()
+        self.mapped_task_ht = tuple(map(map2idx, self.task_ht))
+
+    def _run(
+        self,
+        model: pykeen.models.ERModel,
+        cands: torch.Tensor,  # entities x embedding_dim
+        queries: torch.LongTensor,  # tasks x 2 (ent, rid)
+        gt: dict,
+        ranks: irt2.evaluation.Ranks,
+        tqdm_kwargs,
+    ) -> irt2.evaluation.Prediction:
+        log.info(f"scoring {queries.shape[0]} x {cands.shape[0]} candidates")
+
+        results = {}
+        batches = range(0, len(queries), self.batch_size)
+
+        E = model.entity_representations[0]
+        R = model.relation_representations[0]
+
+        rev = np.empty(cands.shape[0], dtype=np.int64)
+        for i in tqdm(batches, **tqdm_kwargs):
+            q = queries[i : i + self.batch_size]
+
+            scores = model.interaction.score_t(
+                h=E(q[:, 0]),
+                r=R(q[:, 1]),
+                all_entities=cands,
+            )
+
+            scores = scores.detach().cpu().numpy()
+
+            # unfortunately, torch does not support fancy indexing
+            for i, (idx, rid) in enumerate(q.tolist()):
+                task = self.kgc.idx2mid[idx], rid
+                targets = np.array(list(gt[task]), dtype=np.int64)
+
+                perm = np.argsort(scores[i])[::-1]
+                rev[perm] = np.arange(len(rev))
+
+                task_positions = rev[targets]
+                task_scores = scores[i][targets]
+
+                # TODO smarter using perm instead of sorted?
+                preds = zip(targets, task_positions, task_scores)
+                preds = ((int(t), int(p), float(s)) for t, p, s in preds)
+                preds = sorted(preds, key=lambda t: t[2], reverse=True)
+
+                ranks.add(task, *preds)
+
+        return results
+
+    def evaluate(
+        self,
+        *args,
+        model: pykeen.models.ERModel = None,
+        tqdm_kwargs: dict = None,
+        **kwargs,
+    ):
+        tqdm_kwargs = tqdm_kwargs or {}
+        assert model
+
+        model.eval()
+        device = model.device
+
+        mapped_head, mapped_tail = map(list, self.mapped_task_ht)
+
+        head_queries = torch.LongTensor(mapped_head).to(device=device)
+        tail_queries = torch.LongTensor(mapped_tail).to(device=device)
+
+        vids = self.kgc.closed_world_idxs
+
+        cands = torch.LongTensor(list(vids)).to(device=device)
+        cands = model.entity_representations[0](cands)
+
+        # currently the open-world vertices are not removed from the
+        # tasks and we need to do that manually - this can be removed
+        # later on
+
+        head_task = {
+            task: {v for v in targets if v in vids}
+            for task, targets in self.task_ht[0].items()
+        }
+        tail_task = {
+            task: {v for v in targets if v in vids}
+            for task, targets in self.task_ht[1].items()
+        }
+
+        head_ranks = irt2.evaluation.Ranks(head_task)
+        tail_ranks = irt2.evaluation.Ranks(tail_task)
+
+        self._run(model, cands, head_queries, head_task, head_ranks, tqdm_kwargs)
+        self._run(model, cands, tail_queries, tail_task, tail_ranks, tqdm_kwargs)
+
+        evaluator = irt2.evaluation.RankEvaluator(
+            head=(head_ranks, head_task),
+            tail=(tail_ranks, tail_task),
+        )
+
+        result = evaluator.compute_metrics()
+        return IRT2Metrics(result)
+
+
+# --
+
+
 class Projector(pl.LightningModule):
     """Base model with common functionality."""
 
@@ -300,70 +471,84 @@ class Projector(pl.LightningModule):
         }:
             assert self._gathered_projections
 
-        kwargs = {
-            Evaluation.kgc_train: dict(
+        kwargs = dict(
+            train=dict(
                 mapped_triples=dataset.training.mapped_triples,
                 additional_filter_triples=[
                     dataset.training.mapped_triples,
                 ],
             ),
-            Evaluation.kgc_transductive: dict(
+            transductive=dict(
                 mapped_triples=dataset.training.mapped_triples,
                 additional_filter_triples=[
                     dataset.training.mapped_triples,
                 ],
             ),
-            Evaluation.kgc_inductive: dict(
+            inductive=dict(
                 mapped_triples=dataset.validation.mapped_triples,
                 additional_filter_triples=[
                     dataset.training.mapped_triples,
                 ],
             ),
-            Evaluation.kgc_test: dict(
+            test=dict(
                 mapped_triples=dataset.testing.mapped_triples,
                 additional_filter_triples={
                     dataset.training.mapped_triples,
                     dataset.validation.mapped_triples,
                 },
             ),
-        }[which]
+        )[which.split]
 
         if self.debug:
             # choice arbitrary
             log.info("debug mode: reducing mapped triples for scoring")
             kwargs["mapped_triples"] = kwargs["mapped_triples"][:100]
 
-        evaluator = pykeen.evaluation.RankBasedEvaluator(filtered=True)
-        results = self.evaluate_kgc(evaluator, which, **kwargs)
+        if which.evaluator == "irt2":
+            log.warning("TODO set batch size via configuration")
+            evaluator = IRT2Evaluator(irt2=self.irt2, kgc=self.kgc, which=which)
 
+        elif which.evaluator == "kgc":
+            evaluator = pykeen.evaluation.RankBasedEvaluator(filtered=True)
+
+        results = self.evaluate_kgc(evaluator, which, **kwargs)
         return results
 
     def _log_kgc_results(self, which: Evaluation, results):
-        metrics = {
-            "hits@1": results.get_metric("both.realistic.hits_at_1"),
-            "hits@5": results.get_metric("both.realistic.hits_at_5"),
-            "hits@10": results.get_metric("both.realistic.hits_at_10"),
-        }
+        if which.evaluator == "kgc":
+            metrics = {
+                "hits@1": results.get_metric("both.realistic.hits_at_1"),
+                "hits@10": results.get_metric("both.realistic.hits_at_10"),
+            }
 
-        self.log_dict({f"{which.value}/{key}": val for key, val in metrics.items()})
+            realistic = results.get_metric("both.realistic.hits_at_10")
+            log.info(f"{which.value}: >[{realistic * 100:2.3f}]< h@10")
 
-        realistic = results.to_dict()["both"]["realistic"]
-        log.info(f"{which.value}: >[{realistic['hits_at_10'] * 100:2.3f}]< h@10")
+        if which.evaluator == "irt2":
+            metrics = {
+                "hits@1": results["all"]["micro"]["hits_at_1"],
+                "hits@10": results["all"]["micro"]["hits_at_10"],
+                "mrr": results["all"]["micro"]["mrr"],
+            }
+
+        self.log_dict(
+            {f"{which.value}/{key}": val for key, val in metrics.items()},
+        )
 
         if not self.debug:
+            results = results.to_dict()
 
-            fname = (
-                f"epoch={self.current_epoch}"
-                f"-step={self.global_step}"
-                f"_{which.value.split('/')[1]}"
-                ".yaml"
-            )
+            fname = f"epoch={self.current_epoch}-step={self.global_step}.yaml"
+            path = kpath(self.config["out"] / "validation", create=True) / fname
 
-            path = kpath(self.config["out"], is_dir=True)
-            path = kpath(path / "kgc", create=True)
+            former = {}
+            if path.exists():
+                with path.open(mode="r") as fd:
+                    former = yaml.safe_load(fd)
 
+            results |= former
             with (path / fname).open(mode="w") as fd:
-                fd.write(yaml.safe_dump(results.to_dict()))
+                fd.write(yaml.safe_dump(results))
 
     # kgc embedding shenanigans
 
@@ -379,17 +564,13 @@ class Projector(pl.LightningModule):
 
         # train uses the original embeddings
         # (which also checks whether the targets tensor is correct)
-        if which is Evaluation.kgc_train:
-            idxs, source = cw_idxs, closed_world
 
-        if which is Evaluation.kgc_transductive:
-            idxs, source = cw_idxs, self.projections
-
-        if which is Evaluation.kgc_inductive:
-            idxs, source = ow_idxs, self.projections
-
-        if which is Evaluation.kgc_test:
-            idxs, source = ow_idxs, self.projections
+        idxs, source = dict(
+            train=(cw_idxs, closed_world),
+            transductive=(cw_idxs, self.projections),
+            inductive=(ow_idxs, self.projections),
+            test=(ow_idxs, self.projections),
+        )[which.split]
 
         # pykeen directly modifies the _embedding.weight.data
         # https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L395
@@ -587,6 +768,9 @@ class KGCProjector(Projector):
     projections: Tensor
     projections_counts: Tensor
 
+    def ensure_device(self):
+        self.targets = self.targets.to(device=self.device)
+
     # ----------------------------------------
     # projection management
 
@@ -731,7 +915,7 @@ class KGCProjector(Projector):
 
     def on_fit_start(self):
         log.error(f"move targets tensor to {self.device}")
-        self.targets = self.targets.to(device=self.device)
+        self.ensure_device()
         super().on_fit_start()
 
         train = Evaluation.kgc_train
@@ -849,6 +1033,11 @@ class MultiAffineProjector(KGCProjector):
 class JointProjector(Projector):
     kgc: data.KGC
 
+    def ensure_device(self):
+        self.void_i = self.void_i.to(device=self.device)
+        self.void_f = self.void_f.to(device=self.device)
+        self.void_c = self.void_c.to(device=self.device)
+
     def __init__(
         self,
         irt2: IRT2,
@@ -879,6 +1068,12 @@ class JointProjector(Projector):
 
         self.entities = self.scorer.entity_representations[0]
         self.relations = self.scorer.relation_representations[0]
+
+        # empty tensors to avoid control structures around
+        # head/tail partitions (e.g. see self.training_step)
+        self.void_i = torch.zeros(0).to(dtype=torch.int)
+        self.void_f = torch.zeros(0).to(dtype=torch.float)
+        self.void_c = torch.zeros(0).to(dtype=torch.cfloat)
 
         # self.score = pykeen.nn.functional.complex_interaction
         log.info(f"initialized triple scorer: {self.scorer.interaction}")
@@ -1083,12 +1278,7 @@ class JointProjector(Projector):
 
     def on_fit_start(self):
         super().on_fit_start()
-
-        # empty tensors to avoid control structures around
-        # head/tail partitions (e.g. see self.training_step)
-        self.void_i = torch.zeros(0).to(device=self.device, dtype=torch.int)
-        self.void_f = torch.zeros(0).to(device=self.device, dtype=torch.float)
-        self.void_c = torch.zeros(0).to(device=self.device, dtype=torch.cfloat)
+        self.ensure_device()
 
         # this initializes the embeddings based on the kwargs
         self.scorer.reset_parameters_()

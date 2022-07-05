@@ -10,7 +10,7 @@ import torch
 from pudb.var_view import default_stringifier as pudb_str
 
 import irt2m
-from irt2m import eval, train
+from irt2m import evaluation, train
 
 # ---
 
@@ -203,7 +203,7 @@ def grp_evaluate():
 )
 def evaluate_projector(**kwargs):
     """Evaluate a projector model"""
-    eval.projector(**kwargs)
+    evaluation.projector(**kwargs)
 
 
 @grp_evaluate.command(name="create-report")
@@ -215,4 +215,4 @@ def evaluate_projector(**kwargs):
 )
 def create_evaluation_report(**kwargs):
     """Evaluate a projector model"""
-    eval.create_report(**kwargs)
+    evaluation.create_report(**kwargs)
