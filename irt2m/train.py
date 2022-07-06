@@ -14,7 +14,7 @@ import pykeen.pipeline
 import pytorch_lightning as pl
 import yaml
 from irt2.dataset import IRT2
-from ktz.collections import dmerge, ryaml
+from ktz.collections import dmerge, drslv, ryaml
 from ktz.filesystem import path as kpath
 from pytorch_lightning.callbacks.progress import tqdm_progress
 from pytorch_lightning.loggers import WandbLogger
@@ -434,7 +434,7 @@ def _overwrite_config(config, **overwrites):
     for key, trail in mapping:
         if key in overwrites and overwrites[key] is not None:
 
-            opt = data.dotrslv(config, trail, skiplast=1)
+            opt = drslv(config, trail, skiplast=1)
             opt[trail.split(".")[-1]] = overwrites[key]
 
             log.info(f"overwrite >[{trail}]< with {overwrites[key]}")
