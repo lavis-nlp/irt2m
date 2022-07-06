@@ -87,9 +87,6 @@ def init_logging():
     """Read the logging configuration from conf/ and initialize."""
     global log
 
-    if not Path(conf_file).exists(): 
-        return
-
     def _env(key, default):
         if key in os.environ:
             return os.environ[key]
@@ -100,6 +97,9 @@ def init_logging():
     log.removeHandler(log.handlers[0])
 
     conf_file = _env(ENV_LOG_CONF, ENV.DIR.CONF / "logging.yaml")
+    if not Path(conf_file).exists():
+        return
+
     with kpath(conf_file, is_file=True).open(mode="r") as fd:
         conf = yaml.safe_load(fd)
 

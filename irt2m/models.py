@@ -1186,7 +1186,7 @@ class JointProjector(Projector):
 
     def _subbatch(self, collation):
         # take the head and tail parts separately
-        head, tail = collation[:3], collation[3:]
+        head, tail = collation[:2], collation[2:]
         assert len(head) == len(tail)
 
         # figure out the subbatch steps over all samples
@@ -1207,15 +1207,18 @@ class JointProjector(Projector):
 
             yield t1 + t2
 
-    def _forward_directed(self, kind: Literal["head", "tail"], idxs, er, samples):
+    def _forward_directed(self, kind: Literal["head", "tail"], idxs, samples):
         if not samples:
-            return self.void_f, self.void_c, []
+            return self.void_f, self.void_c, [], self.void_i
 
         # if kind == head: heads are encoded text
         # if kind == tail: tails are encoded text
 
         # batch x embedding_dims
         encs, samples = self.forward((idxs, samples))
+
+        er = torch.LongTensor([[sample.ent, sample.rel] for sample in samples])
+        er = er.to(device=self.device)
 
         # batch x embedding_dims
         rels = self.relations(er[:, 1])
@@ -1230,7 +1233,7 @@ class JointProjector(Projector):
             scores = score(t=encs, r=rels, all_entities=ents)
 
         # scores: batch x num_entities
-        return scores, encs, samples
+        return scores, encs, samples, er
 
     def training_step(
         self,
@@ -1244,20 +1247,18 @@ class JointProjector(Projector):
         for subcollation in self._subbatch(collation):
             # th, tt: batch x tokens (int)
             # hr, tr: batch x 2 (int)
-            h_idxs, hr, h_samples, t_idxs, tr, t_samples = subcollation
+            h_idxs, h_samples, t_idxs, t_samples = subcollation
 
             # x: tuple of batch x embedding_dim
-            h_scores, h_encs, h_samples = self._forward_directed(
+            h_scores, h_encs, h_samples, hr = self._forward_directed(
                 kind="head",
                 idxs=h_idxs,
-                er=hr,
                 samples=h_samples,
             )
 
-            t_scores, t_encs, t_samples = self._forward_directed(
+            t_scores, t_encs, t_samples, tr = self._forward_directed(
                 kind="tail",
                 idxs=t_idxs,
-                er=tr,
                 samples=t_samples,
             )
 

@@ -1169,28 +1169,25 @@ class VertexTripleRingbuffer(VertexDataset, RingDataset):
 
         def collate(batch):
             if len(batch) == 0:
-                return torch.zeros(0), torch.zeros(0), []
+                return torch.zeros(0), []
 
             _, padded, samples = RingDataset.collate_fn(batch)
-            er = torch.LongTensor([[sample.ent, sample.rel] for sample in samples])
-            return padded, er, samples
+            return padded, samples
 
-        th, hr, h_samples = collate(h)
-        tt, tr, t_samples = collate(t)
+        th, h_samples = collate(h)
+        tt, t_samples = collate(t)
 
         def transfer(collation, device):
-            th, hr, h_samples, tt, tr, t_samples = collation
+            th, h_samples, tt, t_samples = collation
 
             return (
                 th.to(device=device),
-                hr.to(device=device),
                 h_samples,
                 tt.to(device=device),
-                tr.to(device=device),
                 t_samples,
             )
 
-        return transfer, th, hr, h_samples, tt, tr, t_samples
+        return transfer, th, h_samples, tt, t_samples
 
 
 PROJECTOR_DATASETS = {
