@@ -22,7 +22,7 @@ evaluations:
 
 evaluations_kwargs:
   irt2:
-    batch_size: 100
+    batch_size: 50
 
 # there are three modes:
 #    probe:

@@ -7,8 +7,9 @@ import sys
 from contextlib import contextmanager
 from itertools import count, groupby, islice, zip_longest
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Union
 
+import h5py
 import irt2.evaluation
 import numpy as np
 import pykeen.datasets
@@ -20,7 +21,7 @@ import transformers as tf
 import yaml
 from irt2.dataset import IRT2
 from irt2.types import MID, RID, VID
-from ktz.collections import dflat
+from ktz.collections import dflat, drslv
 from ktz.filesystem import path as kpath
 from torch import Tensor
 from tqdm import tqdm
@@ -136,6 +137,31 @@ class IRT2Evaluator:
     task_ht: tuple[tuple[MID, RID], set[VID]]
     candidates: tuple[VID]
 
+    def _init_task(self, which):
+        # task mids need to be id-mapped to the embedding indexes
+        def map2idx(task):
+            # fmt: off
+            return {
+                (self.kgc.mid2idx[mid], rid): vids
+                for (mid, rid), vids in task.items()
+            }
+            # fmt: on
+
+        # original mids for use by evaluate()
+        self.task_ht = {
+            Evaluation.irt2_inductive: (
+                self.irt2.open_kgc_val_heads,
+                self.irt2.open_kgc_val_tails,
+            ),
+            Evaluation.irt2_test: (
+                self.irt2.open_kgc_test_heads,
+                self.irt2.open_kgc_test_tails,
+            ),
+        }[which]
+
+        # mapped to embedding indexes for use by _run()
+        self.mapped_task_ht = tuple(map(map2idx, self.task_ht))
+
     def __init__(
         self,
         irt2,
@@ -143,6 +169,7 @@ class IRT2Evaluator:
         which: Evaluation,
         limit: int = None,
         batch_size: int = 64,
+        out: Union[str, Path] = None,
     ):
         log.info(f"initialize IRT2 evaluator for >[{which.value}]<")
 
@@ -152,27 +179,9 @@ class IRT2Evaluator:
 
         self.limit = limit
         self.batch_size = batch_size
+        self.out = out
 
-        # task mids need to be id-mapped to the embedding indexes
-        def map2idx(task):
-            return {
-                (self.kgc.mid2idx[mid], rid): vids for (mid, rid), vids in task.items()
-            }
-
-        # original mids for use by evaluate()
-        self.task_ht = {
-            Evaluation.irt2_inductive: (
-                irt2.open_kgc_val_heads,
-                irt2.open_kgc_val_tails,
-            ),
-            Evaluation.irt2_test: (
-                irt2.open_kgc_test_heads,
-                irt2.open_kgc_test_tails,
-            ),
-        }[which]
-
-        # mapped to embedding indexes for use by _run()
-        self.mapped_task_ht = tuple(map(map2idx, self.task_ht))
+        self._init_task(which)
 
     def _add_to_ranks(self, queries, scores, ranks):
         # unfortunately, torch does not support fancy
@@ -196,6 +205,17 @@ class IRT2Evaluator:
 
             task = self.kgc.idx2mid[idx], rid
             ranks.add(task, *preds)
+
+    def __enter__(self):
+        if self.out is None:
+            return
+
+        log.info("opening {self.out} to write scores")
+        self._fd_out = h5py.File("mytestfile.hdf5", "w")
+
+    def __exit__(self, *args, **kwargs):
+        if self.out is None:
+            return
 
     def _run(
         self,
@@ -267,8 +287,9 @@ class IRT2Evaluator:
         head_ranks = irt2.evaluation.Ranks(head_task)
         tail_ranks = irt2.evaluation.Ranks(tail_task)
 
-        self._run(model, cands, head_queries, head_ranks, tqdm_kwargs)
-        self._run(model, cands, tail_queries, tail_ranks, tqdm_kwargs)
+        with self:  # optional score writer context
+            self._run(model, cands, head_queries, head_ranks, tqdm_kwargs)
+            self._run(model, cands, tail_queries, tail_ranks, tqdm_kwargs)
 
         evaluator = irt2.evaluation.RankEvaluator(
             head=(head_ranks, head_task),
@@ -471,20 +492,10 @@ class Projector(pl.LightningModule):
     def evaluate_kgc(self, which, **kwargs):
         raise NotImplementedError()
 
-    # kgc
+    # validation/evaluation
 
-    def run_kgc_evaluation(self, which: Evaluation) -> dict:
-        # print(f"\n\n\nevaluate {which.value} {datetime.now()}\n")
-        log.info(f"running >[{which.value}]< evaluation")
-
+    def _init_kgc_evaluator(self, which, limit, evaluator_kwargs):
         dataset = self.kgc.dataset
-
-        if which in {
-            Evaluation.kgc_transductive,
-            Evaluation.kgc_inductive,
-            Evaluation.kgc_test,
-        }:
-            assert self._gathered_projections
 
         kwargs = dict(
             train=dict(
@@ -514,25 +525,58 @@ class Projector(pl.LightningModule):
             ),
         )[which.split]
 
-        limit = self.trainer.limit_val_batches
+        if limit:
+            log.info(f"reducing mapped triples to {limit} for kgc evaluation")
+            kwargs["mapped_triples"] = kwargs["mapped_triples"][:limit]
 
-        if which.evaluator == "irt2":
-            batch_size = self.config["evaluations_kwargs"]["irt2"]["batch_size"]
-            evaluator = IRT2Evaluator(
-                irt2=self.irt2,
-                kgc=self.kgc,
-                which=which,
-                limit=limit,
-                batch_size=batch_size,
-            )
+        evaluator = pykeen.evaluation.RankBasedEvaluator(
+            filtered=True,
+            **evaluator_kwargs,
+        )
 
-        elif which.evaluator == "kgc":
-            if limit:
-                log.info(f"reducing mapped triples to {limit} for kgc evaluation")
-                kwargs["mapped_triples"] = kwargs["mapped_triples"][:limit]
+        return evaluator, kwargs
 
-            evaluator = pykeen.evaluation.RankBasedEvaluator(filtered=True)
+    def _init_irt2_evaluator(self, which, limit, kwargs):
+        batch_size = self.config["evaluations_kwargs"]["irt2"]["batch_size"]
 
+        evaluator = IRT2Evaluator(
+            irt2=self.irt2,
+            kgc=self.kgc,
+            which=which,
+            limit=limit,
+            batch_size=batch_size,
+            **kwargs,
+        )
+
+        return evaluator, {}
+
+    def run_kgc_evaluation(
+        self,
+        which: Evaluation,
+        **evaluator_kwargs,
+    ) -> dict:
+        log.info(f"running >[{which.value}]< evaluation")
+
+        torch.cuda.empty_cache()
+
+        if which in {
+            Evaluation.kgc_transductive,
+            Evaluation.kgc_inductive,
+            Evaluation.kgc_test,
+            Evaluation.irt2_inductive,
+            Evaluation.irt2_test,
+        }:
+            assert self._gathered_projections
+
+        # cannot use self.trainer.limit_val_batches - it is always set to 1.0...
+        limit = drslv(self.config, "trainer limit_val_batches", default=None)
+
+        initializer = dict(
+            irt2=self._init_irt2_evaluator,
+            kgc=self._init_kgc_evaluator,
+        )[which.evaluator]
+
+        evaluator, kwargs = initializer(which, limit, evaluator_kwargs)
         results = self.evaluate_kgc(evaluator, which, **kwargs)
         return results
 
@@ -554,7 +598,9 @@ class Projector(pl.LightningModule):
 
         if which.evaluator == "irt2":
             flattened = dflat(results)
-            flattened = {k.replace("hits_at_", "hits@"): v for k, v in flattened.items()}
+            flattened = {
+                k.replace("hits_at_", "hits@"): v for k, v in flattened.items()
+            }
             hits = flattened["all micro hits@10"]
 
         log.info(f"{which.value}: >[{hits:2.3f}]< h@10")
