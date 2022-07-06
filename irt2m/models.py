@@ -5,7 +5,7 @@ import enum
 import logging
 import sys
 from contextlib import contextmanager
-from itertools import count, groupby, zip_longest
+from itertools import count, groupby, islice, zip_longest
 from pathlib import Path
 from typing import Literal
 
@@ -20,6 +20,7 @@ import transformers as tf
 import yaml
 from irt2.dataset import IRT2
 from irt2.types import MID, RID, VID
+from ktz.collections import dflat
 from ktz.filesystem import path as kpath
 from torch import Tensor
 from tqdm import tqdm
@@ -135,12 +136,21 @@ class IRT2Evaluator:
     task_ht: tuple[tuple[MID, RID], set[VID]]
     candidates: tuple[VID]
 
-    def __init__(self, irt2, kgc, which: Evaluation, batch_size: int = 64):
+    def __init__(
+        self,
+        irt2,
+        kgc,
+        which: Evaluation,
+        limit: int = None,
+        batch_size: int = 64,
+    ):
         log.info(f"initialize IRT2 evaluator for >[{which.value}]<")
 
         self.irt2 = irt2
         self.kgc = kgc
         self.which = which
+
+        self.limit = limit
         self.batch_size = batch_size
 
         # task mids need to be id-mapped to the embedding indexes
@@ -164,12 +174,34 @@ class IRT2Evaluator:
         # mapped to embedding indexes for use by _run()
         self.mapped_task_ht = tuple(map(map2idx, self.task_ht))
 
+    def _add_to_ranks(self, queries, scores, ranks):
+        # unfortunately, torch does not support fancy
+        # indexing so we fall back to numpy
+        for i, (idx, rid) in enumerate(queries):
+            targets = np.arange(scores.shape[0], dtype=np.int64)
+            perm = np.argsort(scores[i])[::-1]
+
+            # build reverse permutation of argsort for tracking
+            rev = np.empty_like(perm, dtype=np.int64)
+            rev[perm] = np.arange(len(rev))
+
+            # figure out where everybody went
+            task_positions = rev[targets]
+            task_scores = scores[i][targets]
+
+            # TODO smarter re-using perm instead of sorted?
+            preds = zip(targets, task_positions, task_scores)
+            preds = ((int(t), int(p), float(s)) for t, p, s in preds)
+            preds = sorted(preds, key=lambda t: t[2], reverse=True)
+
+            task = self.kgc.idx2mid[idx], rid
+            ranks.add(task, *preds)
+
     def _run(
         self,
         model: pykeen.models.ERModel,
         cands: torch.Tensor,  # entities x embedding_dim
         queries: torch.LongTensor,  # tasks x 2 (ent, rid)
-        gt: dict,
         ranks: irt2.evaluation.Ranks,
         tqdm_kwargs,
     ) -> irt2.evaluation.Prediction:
@@ -181,8 +213,7 @@ class IRT2Evaluator:
         E = model.entity_representations[0]
         R = model.relation_representations[0]
 
-        rev = np.empty(cands.shape[0], dtype=np.int64)
-        for i in tqdm(batches, **tqdm_kwargs):
+        for i in tqdm(islice(batches, self.limit), **tqdm_kwargs):
             q = queries[i : i + self.batch_size]
 
             scores = model.interaction.score_t(
@@ -192,24 +223,7 @@ class IRT2Evaluator:
             )
 
             scores = scores.detach().cpu().numpy()
-
-            # unfortunately, torch does not support fancy indexing
-            for i, (idx, rid) in enumerate(q.tolist()):
-                task = self.kgc.idx2mid[idx], rid
-                targets = np.array(list(gt[task]), dtype=np.int64)
-
-                perm = np.argsort(scores[i])[::-1]
-                rev[perm] = np.arange(len(rev))
-
-                task_positions = rev[targets]
-                task_scores = scores[i][targets]
-
-                # TODO smarter using perm instead of sorted?
-                preds = zip(targets, task_positions, task_scores)
-                preds = ((int(t), int(p), float(s)) for t, p, s in preds)
-                preds = sorted(preds, key=lambda t: t[2], reverse=True)
-
-                ranks.add(task, *preds)
+            self._add_to_ranks(q.tolist(), scores, ranks)
 
         return results
 
@@ -233,7 +247,8 @@ class IRT2Evaluator:
 
         vids = self.kgc.closed_world_idxs
 
-        cands = torch.LongTensor(list(vids)).to(device=device)
+        cands = torch.arange(max(vids) + 1)
+        cands = cands.to(dtype=torch.long, device=device)
         cands = model.entity_representations[0](cands)
 
         # currently the open-world vertices are not removed from the
@@ -252,8 +267,8 @@ class IRT2Evaluator:
         head_ranks = irt2.evaluation.Ranks(head_task)
         tail_ranks = irt2.evaluation.Ranks(tail_task)
 
-        self._run(model, cands, head_queries, head_task, head_ranks, tqdm_kwargs)
-        self._run(model, cands, tail_queries, tail_task, tail_ranks, tqdm_kwargs)
+        self._run(model, cands, head_queries, head_ranks, tqdm_kwargs)
+        self._run(model, cands, tail_queries, tail_ranks, tqdm_kwargs)
 
         evaluator = irt2.evaluation.RankEvaluator(
             head=(head_ranks, head_task),
@@ -499,16 +514,23 @@ class Projector(pl.LightningModule):
             ),
         )[which.split]
 
-        if self.debug:
-            # choice arbitrary
-            log.info("debug mode: reducing mapped triples for scoring")
-            kwargs["mapped_triples"] = kwargs["mapped_triples"][:100]
+        limit = self.trainer.limit_val_batches
 
         if which.evaluator == "irt2":
-            log.warning("TODO set batch size via configuration")
-            evaluator = IRT2Evaluator(irt2=self.irt2, kgc=self.kgc, which=which)
+            batch_size = self.config["evaluations_kwargs"]["irt2"]["batch_size"]
+            evaluator = IRT2Evaluator(
+                irt2=self.irt2,
+                kgc=self.kgc,
+                which=which,
+                limit=limit,
+                batch_size=batch_size,
+            )
 
         elif which.evaluator == "kgc":
+            if limit:
+                log.info(f"reducing mapped triples to {limit} for kgc evaluation")
+                kwargs["mapped_triples"] = kwargs["mapped_triples"][:limit]
+
             evaluator = pykeen.evaluation.RankBasedEvaluator(filtered=True)
 
         results = self.evaluate_kgc(evaluator, which, **kwargs)
@@ -516,38 +538,45 @@ class Projector(pl.LightningModule):
 
     def _log_kgc_results(self, which: Evaluation, results):
         if which.evaluator == "kgc":
-            metrics = {
-                "hits@1": results.get_metric("both.realistic.hits_at_1"),
-                "hits@10": results.get_metric("both.realistic.hits_at_10"),
+            flattened = {
+                k: results.get_metric(v)
+                for k, v in {
+                    "hits@1": "both.realistic.hits_at_1",
+                    "hits@10": "both.realistic.hits_at_10",
+                    "tail hits@1": "tail.realistic.hits_at_1",
+                    "tail hits@10": "tail.realistic.hits_at_10",
+                    "head hits@1": "head.realistic.hits_at_1",
+                    "head hits@10": "head.realistic.hits_at_10",
+                }.items()
             }
 
-            realistic = results.get_metric("both.realistic.hits_at_10")
-            log.info(f"{which.value}: >[{realistic * 100:2.3f}]< h@10")
+            hits = results.get_metric("both.realistic.hits_at_10") * 100
 
         if which.evaluator == "irt2":
-            metrics = {
-                "hits@1": results["all"]["micro"]["hits_at_1"],
-                "hits@10": results["all"]["micro"]["hits_at_10"],
-                "mrr": results["all"]["micro"]["mrr"],
-            }
+            flattened = dflat(results)
+            flattened = {k.replace("hits_at_", "hits@"): v for k, v in flattened.items()}
+            hits = flattened["all micro hits@10"]
 
-        self.log_dict(
-            {f"{which.value}/{key}": val for key, val in metrics.items()},
-        )
+        log.info(f"{which.value}: >[{hits:2.3f}]< h@10")
+        self.log_dict({f"{which.value}/{k}": v for k, v in flattened.items()})
+
+        # write results to disc
 
         if not self.debug:
             results = results.to_dict()
 
             fname = f"epoch={self.current_epoch}-step={self.global_step}.yaml"
-            path = kpath(self.config["out"] / "validation", create=True) / fname
+
+            path = kpath(self.config["out"])
+            path = kpath(path / "validation", create=True) / fname
 
             former = {}
             if path.exists():
                 with path.open(mode="r") as fd:
                     former = yaml.safe_load(fd)
 
-            results |= former
-            with (path / fname).open(mode="w") as fd:
+            results = {which.key: results} | former
+            with (path).open(mode="w") as fd:
                 fd.write(yaml.safe_dump(results))
 
     # kgc embedding shenanigans
@@ -614,14 +643,19 @@ class Projector(pl.LightningModule):
         model.entity_representations[0] = new
 
         try:
+            catched = None
             yield
 
         except Exception as exc:
             log.error(f"kgc evaluation error: {exc}")
+            catched = exc
 
         finally:
             log.info("restoring original kgc model")
             model.entity_representations[0] = old
+
+        if catched is not None:
+            raise catched
 
     # /kgc embedding shenanigans
     # ----------------------------------------
@@ -663,7 +697,12 @@ class Projector(pl.LightningModule):
             self.log("training/projection_error", error)
 
             # run evaluations with projections
-            evaluations = {Evaluation.kgc_transductive, Evaluation.kgc_inductive}
+            evaluations = {
+                Evaluation.kgc_transductive,
+                Evaluation.kgc_inductive,
+                Evaluation.irt2_inductive,
+            }
+
             for which in evaluations & self.evaluations:
                 results = self.run_kgc_evaluation(which)
                 self._log_kgc_results(which, results)
