@@ -18,7 +18,11 @@ evaluations:
   - kgc/train         # closed world kgc with original embeddings (run once before training)
   - kgc/transductive  # closed world kgc with projections (irt2.closed_triples)
   - kgc/inductive     # open world kgc with projections (irt2.open_kgc_val*)
+  - irt2/inductive    # official irt2 evaluation
 
+evaluations_kwargs:
+  irt2:
+    batch_size: 100
 
 # there are three modes:
 #    probe:
@@ -28,7 +32,8 @@ evaluations:
 #      - no data is written to disk
 #    limited:
 #      - run 10 batches per validation and train
-#      - evaluate 100 triples in kgc evaluation
+#      - evaluate 10 triples in kgc evaluation
+#      - evaluate 10 batches in irt2 evaluation
 #      - logger is disabled
 #      - no data is written to disk
 #    full
@@ -59,6 +64,8 @@ scheduler_kwargs: {}
 trainer:
   gpus: 1
   max_epochs: 200
+  # limit_train_batches: 1
+  # limit_val_batches: 1
 
 wandb:
   project: irt2-projector

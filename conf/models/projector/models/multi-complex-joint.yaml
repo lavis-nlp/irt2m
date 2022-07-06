@@ -22,7 +22,7 @@ module:
   train_loader_kwargs:
     shuffle: true
     batch_size: 1
-    subbatch_size: 4
+    subbatch_size: 10
 
   valid_ds: mention ringbuffer
   valid_ds_kwargs:
@@ -37,4 +37,4 @@ module:
 optimizer: adam
 optimizer_kwargs:
   lr: 5.0e-05
-  weight_decay: 0.1
+  weight_decay: 0.01
