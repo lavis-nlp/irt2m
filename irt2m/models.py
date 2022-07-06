@@ -597,11 +597,15 @@ class Projector(pl.LightningModule):
             hits = results.get_metric("both.realistic.hits_at_10") * 100
 
         if which.evaluator == "irt2":
+            # fmt: off
             flattened = dflat(results)
             flattened = {
-                k.replace("hits_at_", "hits@"): v for k, v in flattened.items()
+                k.replace("hits_at_", "hits@"): v
+                for k, v in flattened.items()
             }
-            hits = flattened["all micro hits@10"]
+            # fmt: on
+
+            hits = flattened["all micro hits@10"] * 100
 
         log.info(f"{which.value}: >[{hits:2.3f}]< h@10")
         self.log_dict({f"{which.value}/{k}": v for k, v in flattened.items()})
