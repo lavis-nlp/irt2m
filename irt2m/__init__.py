@@ -87,6 +87,9 @@ def init_logging():
     """Read the logging configuration from conf/ and initialize."""
     global log
 
+    if not Path(conf_file).exists(): 
+        return
+
     def _env(key, default):
         if key in os.environ:
             return os.environ[key]
