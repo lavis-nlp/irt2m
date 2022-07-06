@@ -183,6 +183,27 @@ class IRT2Evaluator:
 
         self._init_task(which)
 
+    # -- writer
+
+    def __enter__(self):
+        if self.out is None:
+            return
+
+        log.info(f"opening {self.out} to write scores")
+        self._fd_out = h5py.File(str(self.out.resolve()), "w")
+
+    def __exit__(self, *args, **kwargs):
+        if self.out is None:
+            return
+
+        log.info(f"closing {self.out}")
+        self._fd_out.close()
+
+    def _write_scores(self, queries, scores):
+        breakpoint()
+
+    # -- ranks
+
     def _add_to_ranks(self, queries, scores, ranks):
         # unfortunately, torch does not support fancy
         # indexing so we fall back to numpy
@@ -206,16 +227,7 @@ class IRT2Evaluator:
             task = self.kgc.idx2mid[idx], rid
             ranks.add(task, *preds)
 
-    def __enter__(self):
-        if self.out is None:
-            return
-
-        log.info("opening {self.out} to write scores")
-        self._fd_out = h5py.File("mytestfile.hdf5", "w")
-
-    def __exit__(self, *args, **kwargs):
-        if self.out is None:
-            return
+    # -- scoring
 
     def _run(
         self,
@@ -243,7 +255,11 @@ class IRT2Evaluator:
             )
 
             scores = scores.detach().cpu().numpy()
-            self._add_to_ranks(q.tolist(), scores, ranks)
+            q = q.tolist()
+
+            self._add_to_ranks(q, scores, ranks)
+            if self.out:
+                self._write_scores(q, scores)
 
         return results
 
@@ -484,13 +500,25 @@ class Projector(pl.LightningModule):
 
         return encoded[0]
 
-    # interface
+    def forward(
+        self,
+        collation: tuple[Tensor, list[data.ProjectorSample]],
+    ):
+        indexes, samples = collation
 
-    def forward(self, batch):
-        raise NotImplementedError()
+        # sub-batch x tokens x text_dims
+        encoded = self.encode(indexes)
 
-    def evaluate_kgc(self, which, **kwargs):
-        raise NotImplementedError()
+        # sub-batch x text_dims
+        aggregated = self.aggregate(encoded)
+
+        # (unique) keys x text_dims
+        reduced, reduced_samples = self.reduce(aggregated, samples)
+
+        # (unique) keys x kge_dims
+        projected = self.project(reduced)
+
+        return projected, reduced_samples
 
     # validation/evaluation
 
@@ -537,7 +565,11 @@ class Projector(pl.LightningModule):
         return evaluator, kwargs
 
     def _init_irt2_evaluator(self, which, limit, kwargs):
-        batch_size = self.config["evaluations_kwargs"]["irt2"]["batch_size"]
+        batch_size = drslv(
+            self.config,
+            "evaluations_kwargs irt2 batch_size",
+            default=50
+        )
 
         evaluator = IRT2Evaluator(
             irt2=self.irt2,
@@ -759,6 +791,23 @@ class Projector(pl.LightningModule):
 
         self.clear_projections()
 
+    # interface
+
+    # batch x tokens x text_dims -> batch x text_dims
+    def aggregate(self, encoded: Tensor) -> Tensor:
+        raise NotImplementedError()
+
+    # batch x textdims -> [unique] keys x text_dims
+    def reduce(self, aggregated, samples):
+        raise NotImplementedError()
+
+    # [unique] keys x kge dims
+    def project(self, reduced: Tensor) -> Tensor:
+        raise NotImplementedError()
+
+    def evaluate_kgc(self, which, **kwargs):
+        raise NotImplementedError()
+
 
 # --- OPEN WORLD PROJECTOR TRAINING
 
@@ -930,6 +979,14 @@ class KGCProjector(Projector):
         self.kgc_model = KGCModel(config)
         self._init_projections()
 
+        self.loss = torch.nn.MSELoss()
+
+        self.projector = torch.nn.Linear(
+            self.encoder.config.hidden_size,
+            self.kgc_embedding_dim,
+        )
+
+
     # ----------------------------------------
     # lightning callbacks and training
 
@@ -943,26 +1000,6 @@ class KGCProjector(Projector):
             yield batch[j:k], samples[j:k]
 
     # --
-
-    def forward(
-        self,
-        collation: tuple[Tensor, list[data.ProjectorSample]],
-    ):
-        indexes, samples = collation
-
-        # sub-batch x tokens x text_dims
-        encoded = self.encode(indexes)
-
-        # sub-batch x text_dims
-        aggregated = self.aggregate(encoded)
-
-        # (unique) keys x text_dims
-        reduced, reduced_samples = self.reduce(aggregated, samples)
-
-        # (unique) keys x kge_dims
-        projected = self.project(reduced)
-
-        return projected, reduced_samples
 
     def training_step(
         self,
@@ -1025,20 +1062,14 @@ class KGCProjector(Projector):
     # ----------------------------------------
     # interface
 
-    # batch x tokens x text_dims -> batch x text_dims
-    def aggregate(self, encoded: Tensor) -> Tensor:
-        raise NotImplementedError()
+    def aggregate(self, encoded):
+        return encoded[:, 0]
 
-    # batch x textdims -> [unique] keys x text_dims
-    def reduce(self, aggregated, samples):
-        raise NotImplementedError()
+    def project(self, reduced: Tensor):
+        return self.projector(reduced)
 
-    # [unique] keys x kge dims
-    def project(self, reduced: Tensor) -> Tensor:
-        raise NotImplementedError()
-
-    def compare(self, projected: Tensor, target: Tensor) -> Tensor:
-        raise NotImplementedError()
+    def compare(self, projected, target):
+        return self.loss(projected, target)
 
     # /interface
     # ----------------------------------------
@@ -1066,23 +1097,8 @@ class SingleAffineProjector(KGCProjector):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.loss = torch.nn.MSELoss()
-        self.projector = torch.nn.Linear(
-            self.encoder.config.hidden_size,
-            self.kgc_embedding_dim,
-        )
-
-    def aggregate(self, encoded):
-        return encoded[:, 0]
-
     def reduce(self, aggregated, samples):
         return aggregated, samples
-
-    def project(self, reduced: Tensor):
-        return self.projector(reduced)
-
-    def compare(self, projected, target):
-        return self.loss(projected, target)
 
 
 class MultiAffineProjector(KGCProjector):
@@ -1095,23 +1111,8 @@ class MultiAffineProjector(KGCProjector):
         self.pooling = pooling
         log.info(f"aggregations will be >[{self.pooling}-pooled]<")
 
-        self.loss = torch.nn.MSELoss()
-        self.projector = torch.nn.Linear(
-            self.encoder.config.hidden_size,
-            self.kgc_embedding_dim,
-        )
-
-    def aggregate(self, encoded):
-        return encoded[:, 0]
-
     def reduce(self, aggregated, samples):
         return f_reduce_multi(aggregated, samples, self.pooling)
-
-    def project(self, reduced: Tensor):
-        return self.projector(reduced)
-
-    def compare(self, projected, target):
-        return self.loss(projected, target)
 
 
 #
@@ -1139,7 +1140,7 @@ class JointProjector(Projector):
     ):
         super().__init__(irt2, config, *args, **kwargs)
 
-        self.project = torch.nn.Linear(
+        self.projector = torch.nn.Linear(
             in_features=self.encoder.config.hidden_size,
             # https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L353
             out_features=embedding_dim * 2,
@@ -1183,54 +1184,6 @@ class JointProjector(Projector):
             dtype=torch.cfloat,
         )
 
-    def _forward_project(self, collation):
-        idxs, samples = collation
-        B = idxs.shape[0]
-
-        # view_as_complex: N x D x 2 -> N x D
-        # view_as_real:    N x D -> N x D x 2
-        complex = torch.view_as_complex
-
-        # batch x text_dims
-        encs = self.encode(idxs)[:, 0]
-
-        # (unique) samples x text_dims
-        self.reduce(encs, samples)
-
-        # (unique) samples x embedding_dims
-        encs = complex(self.project(encs).view(B, -1, 2))
-
-        return encs, samples
-
-    def _forward_directed(self, kind: Literal["head", "tail"], idxs, er, samples):
-        if not samples:
-            return self.void_f, self.void_c, tuple()
-
-        # if kind == head: heads are encoded text
-        # if kind == tail: tails are encoded text
-
-        # batch x embedding_dims
-        encs, samples = self._forward_project((idxs, samples))
-        # >> TBR
-        # idxs = [s.key for s in samples]
-        # encs = self.entities(torch.LongTensor(idxs).to(device=self.device))
-        # << TBR
-
-        # batch x embedding_dims
-        rels = self.relations(er[:, 1])
-        ents = self.entities(None)
-
-        assert kind in {"head", "tail"}
-        if kind == "head":
-            score = self.scorer.interaction.score_t
-            scores = score(h=encs, r=rels, all_entities=ents)
-        if kind == "tail":
-            score = self.scorer.interaction.score_h
-            scores = score(t=encs, r=rels, all_entities=ents)
-
-        # scores: batch x num_entities
-        return scores, encs, samples
-
     def _subbatch(self, collation):
         # take the head and tail parts separately
         head, tail = collation[:3], collation[3:]
@@ -1253,6 +1206,31 @@ class JointProjector(Projector):
             t2 = tuple(map(lambda t: t[s2], tail))
 
             yield t1 + t2
+
+    def _forward_directed(self, kind: Literal["head", "tail"], idxs, er, samples):
+        if not samples:
+            return self.void_f, self.void_c, []
+
+        # if kind == head: heads are encoded text
+        # if kind == tail: tails are encoded text
+
+        # batch x embedding_dims
+        encs, samples = self.forward((idxs, samples))
+
+        # batch x embedding_dims
+        rels = self.relations(er[:, 1])
+        ents = self.entities(None)
+
+        assert kind in {"head", "tail"}
+        if kind == "head":
+            score = self.scorer.interaction.score_t
+            scores = score(h=encs, r=rels, all_entities=ents)
+        if kind == "tail":
+            score = self.scorer.interaction.score_h
+            scores = score(t=encs, r=rels, all_entities=ents)
+
+        # scores: batch x num_entities
+        return scores, encs, samples
 
     def training_step(
         self,
@@ -1283,7 +1261,7 @@ class JointProjector(Projector):
                 samples=t_samples,
             )
 
-            samples = h_samples + t_samples
+            samples = list(h_samples) + list(t_samples)
             encs = torch.cat((h_encs, t_encs))
             scores = torch.cat((h_scores, t_scores))
             targets = torch.cat(
@@ -1339,7 +1317,7 @@ class JointProjector(Projector):
         collation: tuple[Tensor, list[data.ProjectorSample]],
         batch_idx,
     ):
-        projections, samples = self._forward_project(collation)
+        projections, samples = self.forward(collation)
         self.update_projections(projections, samples)
 
     # --
@@ -1382,21 +1360,31 @@ class JointProjector(Projector):
 
         super().on_validation_epoch_end(*args)
 
+    # --
+
+    def aggregate(self, encoded):
+        return encoded[:, 0]
+
+    def project(self, reduced):
+        B = reduced.shape[0]
+        complex = torch.view_as_complex
+
+        projected = self.projector(reduced).view(B, -1, 2)
+        return complex(projected)
+
 
 class SingleComplexJoint(JointProjector):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, *args, embedding_dim: int = None, **kwargs):
+        super().__init__(*args, embedding_dim=embedding_dim, **kwargs)
 
     def reduce(self, aggregated, samples):
         return aggregated, samples
-
 
 class MultiComplexJoint(JointProjector):
     pooling: Literal["mean", "max"]
 
     def __init__(self, *args, pooling: str = "mean", **kwargs):
         super().__init__(*args, **kwargs)
-
         self.pooling = pooling
         log.info(f"aggregations will be >[{self.pooling}-pooled]<")
 
