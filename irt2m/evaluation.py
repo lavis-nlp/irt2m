@@ -15,6 +15,7 @@ import torch
 import torch.utils.data as td
 import yaml
 from irt2.dataset import IRT2
+from ktz.collections import dflat
 from ktz.collections import drslv as _drslv
 from ktz.filesystem import path as kpath
 from tabulate import tabulate
@@ -31,6 +32,9 @@ drslv = partial(_drslv, sep=".")
 # --
 
 
+SUBDIR = "evaluation"
+
+
 def hits(dic, k):
     try:
         return dic["both"]["realistic"][f"hits_at_{k}"]
@@ -44,7 +48,6 @@ def _apply_backports(config: dict):
         config["mode"] = "full"
 
 
-# TODO move classes like these to data?
 class ProjectorResult:
 
     path: Path
@@ -56,7 +59,7 @@ class ProjectorResult:
     @cached_property
     def description(self):
         header = str(self)
-        checkpoints = "\n".join([f"  - {path.name}" for path in self.checkpoints])
+        checkpoints = "\n".join([f"  - {path.stem}" for path in self.checkpoints])
 
         tablehead = "train", "transductive", "inductive"
         tablerows = []
@@ -129,7 +132,7 @@ class ProjectorResult:
         for glob in path.glob("checkpoints/*ckpt"):
             self.checkpoints.append(glob)
 
-        path_kgc_results = path / "eval" / "kgc_results.yaml"
+        path_kgc_results = path / SUBDIR / "metrics.yaml"
         self.kgc_results = {}
         if path_kgc_results.exists():
             log.info("found and loading evaluation results")
@@ -140,7 +143,22 @@ class ProjectorResult:
 
     # ---
 
-    def load(self, checkpoint: str):
+    def _get_checkpoint(self, checkpoint):
+        checkpoints = self.path / "checkpoints"
+
+        if checkpoint is None:
+            _, epoch, _ = self.best("inductive")
+            globs = list(checkpoints.glob(f"epoch={epoch}*.ckpt"))
+            path = globs[0] if len(globs) == 1 else checkpoints / "last.ckpt"
+
+        else:
+            path = checkpoints / checkpoint
+
+        # --
+
+        return path
+
+    def load(self, checkpoint: str = None):
         log.info("loading checkpoint")
 
         print("loading IRT2...")
@@ -150,16 +168,19 @@ class ProjectorResult:
         print("loading module...")
         module = data.ProjectorModule(irt2, self.config)
 
+        checkpoint = self._get_checkpoint(checkpoint)
+        print(f"loading checkpoint: {checkpoint.name}")
+
         Projector = models.MODELS[self.config["model"]]
-        path = self.path / "checkpoints" / checkpoint
         model = Projector.load_from_checkpoint(
-            path,
+            checkpoint,
             irt2=irt2,
             config=self.config,
             tokenizer=module.tokenizer,
+            **self.config.get("model_kwargs", {}),
         )
 
-        return irt2, module, model
+        return irt2, checkpoint, module, model
 
 
 def create_projections(
@@ -173,8 +194,10 @@ def create_projections(
     ds_kwargs = config["module"]["valid_ds_kwargs"]
     print(">> dataset: ", ds_kwargs)
 
-    dl_kwargs = config["module"]["valid_loader_kwargs"]
+    # evaluate projections like they were trained
+    dl_kwargs = config["module"]["train_loader_kwargs"]
     dl_kwargs |= dict(shuffle=False, batch_size=batch_size)
+
     print(">> dataloader:", dl_kwargs)
 
     loaders = {
@@ -237,14 +260,15 @@ def create_projections(
 
 def init_projections(
     source: Path,
-    config,
+    config: dict,
+    checkpoint: str,
     irt2,
     model,
     module,
     device,
     batch_size,
 ):
-    cache = kpath(source / "eval", create=True) / "projections.pkl"
+    cache = kpath(source / SUBDIR, create=True) / f"{checkpoint}.projections.pkl"
     if cache.exists():
         print("loading projections from cache")
 
@@ -279,10 +303,10 @@ def init_projections(
     return cached
 
 
-def run_kgc_evaluation(source, model, force: bool):
+def run_kgc_evaluation(source, model, checkpoint: str, force: bool):
     # both run pykeen and irt2 evaluations
-
-    cache = kpath(source / "eval", create=True) / "metrics.yaml"
+    path = kpath(source / SUBDIR, create=True)
+    cache = path / "{checkpoint}.metrics.yaml"
 
     if not force and cache.exists():
         print("loading results from cache")
@@ -305,7 +329,11 @@ def run_kgc_evaluation(source, model, force: bool):
 
     results = {}
     for which in evaluations:
-        res = model.run_kgc_evaluation(which)
+        kwargs = {}
+        if which.evaluator == "irt2":
+            kwargs = dict(out=path / f"{checkpoint}.scores.{which.split}.h5")
+
+        res = model.run_kgc_evaluation(which, **kwargs)
         results[which.key] = res.to_dict()
 
     with cache.open(mode="w") as fd:
@@ -332,14 +360,11 @@ def projector(
     print(textwrap.indent(str(result.description), prefix))
     print()
 
-    print("TODO load best checkpoint")
-    assert checkpoint, "TODO load best checkpoint"
-
     result.config["mode"] = "probe"
 
     # initialize model and data
 
-    irt2, module, model = result.load(checkpoint)
+    irt2, checkpoint, module, model = result.load(checkpoint)
     device = torch.device("cuda")
 
     model = model.to(device=device)
@@ -349,11 +374,10 @@ def projector(
     if batch_size is None:
         batch_size = result.config["module"]["valid_loader_kwargs"]["batch_size"]
 
-    # module.setup("evaluation")
-
     cached = init_projections(
         source,
         result.config,
+        checkpoint.stem,
         irt2,
         model,
         module,
@@ -366,6 +390,7 @@ def projector(
     results = run_kgc_evaluation(
         source,
         model,
+        checkpoint.stem,
         force=not cached,
     )
 
@@ -387,9 +412,9 @@ def projector(
         rows.append(
             (
                 key,
-                drslv(result, f"{prefix}.hits_at_1"),
-                drslv(result, f"{prefix}.hits_at_10"),
-                drslv(result, f"{prefix}.mrr"),
+                drslv(result, f"{prefix}.hits_at_1") * 100,
+                drslv(result, f"{prefix}.hits_at_10") * 100,
+                drslv(result, f"{prefix}.mrr") * 100,
             )
         )
 
@@ -432,6 +457,16 @@ def create_report(folder: str):
 
     print(f"loading {len(glob)} results")
 
+    def dic2row(dic, mapping):
+        return {k: drslv(dic, v, default=0) for k, v in mapping.items()}
+
+    def irt2row(dic, key, *contains):
+        return {
+            f"{key} {k}".replace("hits_at_", "h@"): v * 100
+            for k, v in dflat(dic[key]).items()
+            if all(c in k for c in contains)
+        }
+
     rows = []
     for source in glob:
         row = {}
@@ -442,49 +477,56 @@ def create_report(folder: str):
         print(textwrap.indent(str(result), prefix="  - "))
 
         if not result.kgc_results:
-            print(f"skipping {source}: not evaluated yet")
+            print("    - skipping! not evaluated yet")
+            continue
 
-        result_row = {
-            "pykeen train h@1": "kgc/train.both.realistic.hits_at_1",
-            "pykeen train h@10": "kgc/train.both.realistic.hits_at_10",
-            "pykeen transductive h@1": "kgc/transductive.both.realistic.hits_at_1",
-            "pykeen transductive h@10": "kgc/transductive.both.realistic.hits_at_10",
-            "pykeen inductive h@1": "kgc/inductive.both.realistic.hits_at_1",
-            "pykeen inductive h@10": "kgc/inductive.both.realistic.hits_at_10",
-            "pykeen test h@1": "kgc/test.both.realistic.hits_at_1",
-            "pykeen test h@10": "kgc/test.both.realistic.hits_at_10",
-        }
+        row |= irt2row(result.kgc_results, "irt2_test", "micro")
+        row |= irt2row(result.kgc_results, "irt2_inductive", "micro")
 
-        row |= {k: drslv(result.kgc_results, v) for k, v in result_row.items()}
+        kgcrow = dic2row(
+            result.kgc_results,
+            {
+                "kgc_test h@1": "kgc_test.both.realistic.hits_at_1",
+                "kgc_test h@10": "kgc_test.both.realistic.hits_at_10",
+                "kgc_inductive h@1": "kgc_inductive.both.realistic.hits_at_1",
+                "kgc_inductive h@10": "kgc_inductive.both.realistic.hits_at_10",
+                "kgc_transductive h@1": "kgc_transductive.both.realistic.hits_at_1",
+                "kgc_transductive h@10": "kgc_transductive.both.realistic.hits_at_10",
+                "kgc_train h@1": "kgc_train.both.realistic.hits_at_1",
+                "kgc_train h@10": "kgc_train.both.realistic.hits_at_10",
+            },
+        )
 
-        config_row = {
-            "prefix": "prefix",
-            "date": "timestamp",
-            "contexts per sample": "module.train_ds_kwargs.max_contexts_per_sample",
-            "contexts per batch": "module.train_ds_kwargs.contexts_per_sample",
-            "batch size": "module.train_loader_kwargs.batch_size",
-            "subbatch size": "module.train_loader_kwargs.subbatch_size",
-            "epochs": "trainer.max_epochs",
-        }
+        row |= {k: v * 100 for k, v in kgcrow.items()}
 
-        row |= {k: drslv(result.config, v) for k, v in config_row.items()}
+        row |= dic2row(
+            result.config,
+            {
+                "prefix": "prefix",
+                "date": "timestamp",
+                "contexts per sample": "module.train_ds_kwargs.max_contexts_per_sample",
+                "contexts per batch": "module.train_ds_kwargs.contexts_per_sample",
+                "batch size": "module.train_loader_kwargs.batch_size",
+                "subbatch size": "module.train_loader_kwargs.subbatch_size",
+                "epochs": "trainer.max_epochs",
+            },
+        )
 
-        for k in 1, 10:
-            for kind in "inductive", "transductive":
-                hits, _, _ = result.best(kind, k=k)
-
-                row |= {
-                    # f"{kind} epoch": epoch,
-                    f"training {kind} h@{k}": hits,
-                }
+        row |= irt2row(result.kgc_results, "irt2_test", "macro")
+        row |= irt2row(result.kgc_results, "irt2_inductive", "macro")
 
         # supplemental
+
         row |= {
             "folder": str(source),
             "evaluated on": datetime.now().isoformat(),
         }
 
         rows.append(row)
+
+    if not rows:
+        print("nothing to do.")
+        return
 
     out = folder / "summary.csv"
     with (out).open(mode="w") as fd:

@@ -185,22 +185,46 @@ class IRT2Evaluator:
 
     # -- writer
 
+    # all information inside the h5 file works with
+    # the original embedding _indexes_ and open-world
+    # entities must be translated to mids using self.kgc
+
+    @property
+    def _nowrite(self):
+        return self.out is None
+
     def __enter__(self):
-        if self.out is None:
+        if self._nowrite:
             return
 
         log.info(f"opening {self.out} to write scores")
-        self._fd_out = h5py.File(str(self.out.resolve()), "w")
+        self._h5 = h5py.File(str(self.out.resolve()), "w")
 
     def __exit__(self, *args, **kwargs):
-        if self.out is None:
+        if self._nowrite:
             return
 
         log.info(f"closing {self.out}")
-        self._fd_out.close()
+        self._h5.close()
 
-    def _write_scores(self, queries, scores):
-        breakpoint()
+    def _init_h5_datasets(self, T: int):
+        if self._nowrite:
+            return
+
+        for kind, task in zip(("head", "tail"), self.task_ht):
+            grp = self._h5.create_group(kind)
+            N = len(task)
+
+            grp.create_dataset("scores", (N, T), dtype="float32")
+            grp.create_dataset("tasks", (N, 2))
+
+    def _write_scores(self, kind, i, j, queries, scores):
+        if self._nowrite:
+            return
+
+        grp = self._h5[kind]
+        grp["scores"][i:j] = scores
+        grp["tasks"][i:j] = queries
 
     # -- ranks
 
@@ -231,6 +255,7 @@ class IRT2Evaluator:
 
     def _run(
         self,
+        kind: str,
         model: pykeen.models.ERModel,
         cands: torch.Tensor,  # entities x embedding_dim
         queries: torch.LongTensor,  # tasks x 2 (ent, rid)
@@ -239,14 +264,18 @@ class IRT2Evaluator:
     ) -> irt2.evaluation.Prediction:
         log.info(f"scoring {queries.shape[0]} x {cands.shape[0]} candidates")
 
-        results = {}
-        batches = range(0, len(queries), self.batch_size)
-
         E = model.entity_representations[0]
         R = model.relation_representations[0]
 
-        for i in tqdm(islice(batches, self.limit), **tqdm_kwargs):
-            q = queries[i : i + self.batch_size]
+        results = {}
+        batches = range(0, len(queries), self.batch_size)
+
+        gen = islice(batches, self.limit)
+        total = self.limit if self.limit else len(batches)
+
+        for i in tqdm(gen, total=total, **tqdm_kwargs):
+            j = i + self.batch_size
+            q = queries[i:j]
 
             scores = model.interaction.score_t(
                 h=E(q[:, 0]),
@@ -258,8 +287,7 @@ class IRT2Evaluator:
             q = q.tolist()
 
             self._add_to_ranks(q, scores, ranks)
-            if self.out:
-                self._write_scores(q, scores)
+            self._write_scores(kind, i, j, q, scores)
 
         return results
 
@@ -304,8 +332,9 @@ class IRT2Evaluator:
         tail_ranks = irt2.evaluation.Ranks(tail_task)
 
         with self:  # optional score writer context
-            self._run(model, cands, head_queries, head_ranks, tqdm_kwargs)
-            self._run(model, cands, tail_queries, tail_ranks, tqdm_kwargs)
+            self._init_h5_datasets(T=cands.shape[0])
+            self._run("head", model, cands, head_queries, head_ranks, tqdm_kwargs)
+            self._run("tail", model, cands, tail_queries, tail_ranks, tqdm_kwargs)
 
         evaluator = irt2.evaluation.RankEvaluator(
             head=(head_ranks, head_task),
@@ -566,9 +595,7 @@ class Projector(pl.LightningModule):
 
     def _init_irt2_evaluator(self, which, limit, kwargs):
         batch_size = drslv(
-            self.config,
-            "evaluations_kwargs irt2 batch_size",
-            default=50
+            self.config, "evaluations_kwargs irt2 batch_size", default=50
         )
 
         evaluator = IRT2Evaluator(
@@ -986,7 +1013,6 @@ class KGCProjector(Projector):
             self.kgc_embedding_dim,
         )
 
-
     # ----------------------------------------
     # lightning callbacks and training
 
@@ -1380,6 +1406,7 @@ class SingleComplexJoint(JointProjector):
 
     def reduce(self, aggregated, samples):
         return aggregated, samples
+
 
 class MultiComplexJoint(JointProjector):
     pooling: Literal["mean", "max"]
