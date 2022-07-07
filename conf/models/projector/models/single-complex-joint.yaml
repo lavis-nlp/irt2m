@@ -8,14 +8,6 @@ model_kwargs:
     weight: 0.1
     normalize: true
 
-early_stopping: true
-early_stopping_kwargs:
-  min_delta: 0.001
-  patience: 5
-  mode: max
-  monitor: kgc/inductive/hits@10
-
-
 # for available datasets see irt2m.data.PROJECTOR_DATASETS
 #   and their respective __init__ methods for *ds_kwargs
 #

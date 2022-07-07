@@ -54,7 +54,10 @@ checkpoint:
   save_last: true
   save_top_k: 1
 
-early_stopping_args:
+early_stopping: true
+early_stopping_kwargs:
+  min_delta: 0.001
+  patience: 5
   mode: max
   monitor: kgc/inductive/hits@10
 

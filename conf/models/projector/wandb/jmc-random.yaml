@@ -19,7 +19,6 @@ parameters:
     values:
       - 10
       - 100
-      - 1000
 
   learning-rate:
     distribution: uniform
