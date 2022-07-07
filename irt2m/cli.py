@@ -12,6 +12,7 @@ from pudb.var_view import default_stringifier as pudb_str
 import irt2m
 from irt2m import evaluation, train
 
+
 # ---
 
 
@@ -211,8 +212,16 @@ def evaluate_projector(**kwargs):
     "--folder",
     type=str,
     required=True,
-    help="directory where checkpoints can be found",
+    help="directory where **/checkpoints/ can be found",
 )
 def create_evaluation_report(**kwargs):
     """Evaluate a projector model"""
     evaluation.create_report(**kwargs)
+
+
+# ---
+
+# we need to actively pull all other modules
+# which register click commands
+
+import irt2m.migrations  # noqa
