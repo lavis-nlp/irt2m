@@ -1199,7 +1199,7 @@ PROJECTOR_DATASETS = {
 }
 
 
-class ProjectorTrainLoader(td.DataLoader):
+class ProjectorLoader(td.DataLoader):
 
     subbatch_size: int
 
@@ -1280,7 +1280,7 @@ class ProjectorModule(pl.LightningDataModule):
         self.valid_loader_kwargs = modconf["valid_loader_kwargs"]
 
     def train_dataloader(self):
-        return ProjectorTrainLoader(
+        return ProjectorLoader(
             self.train_ds,
             collate_fn=self.train_ds.collate_fn,
             **self.train_loader_kwargs,
@@ -1288,7 +1288,7 @@ class ProjectorModule(pl.LightningDataModule):
         )
 
     def val_dataloader(self):
-        return td.DataLoader(
+        return ProjectorLoader(
             self.valid_ds,
             collate_fn=self.valid_ds.collate_fn,
             **self.valid_loader_kwargs,

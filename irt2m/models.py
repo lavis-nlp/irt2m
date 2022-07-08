@@ -216,7 +216,7 @@ class IRT2Evaluator:
             N = len(task)
 
             grp.create_dataset("scores", (N, T), dtype="float32")
-            grp.create_dataset("tasks", (N, 2))
+            grp.create_dataset("tasks", (N, 2), dtype="int")
 
     def _write_scores(self, kind, i, j, queries, scores):
         if self._nowrite:

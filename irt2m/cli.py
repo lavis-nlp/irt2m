@@ -12,7 +12,6 @@ from pudb.var_view import default_stringifier as pudb_str
 import irt2m
 from irt2m import evaluation, train
 
-
 # ---
 
 
@@ -178,7 +177,7 @@ def train_projector(**kwargs):
 
 @main.group(name="evaluate")
 def grp_evaluate():
-    """Evaluating models."""
+    """Evaluate models."""
     pass
 
 
@@ -187,7 +186,6 @@ def grp_evaluate():
     "--source",
     type=str,
     required=True,
-    # multiple=True  # TODO run for all
     help="directory defined in config['out']",
 )
 @click.option(
@@ -203,7 +201,7 @@ def grp_evaluate():
     help="batch-size, otherwise use validation batch size",
 )
 def evaluate_projector(**kwargs):
-    """Evaluate a projector model"""
+    """Evaluate a projector model."""
     evaluation.projector(**kwargs)
 
 
@@ -225,3 +223,5 @@ def create_evaluation_report(**kwargs):
 # which register click commands
 
 import irt2m.migrations  # noqa
+
+# which register click commands
