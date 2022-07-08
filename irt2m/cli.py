@@ -167,6 +167,13 @@ def train_kgc(**kwargs):
     required=False,
     help="overwrites the optimizers' weight-decay",
 )
+@click.option(
+    "--embedding-dim",
+    type=int,
+    default=None,
+    required=False,
+    help="overwrites the models embedding dim (joint only)",
+)
 def train_projector(**kwargs):
     """Train a projector that maps text to KGC vertices."""
     train.projector(**kwargs)

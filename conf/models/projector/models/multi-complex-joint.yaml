@@ -38,3 +38,10 @@ optimizer: adam
 optimizer_kwargs:
   lr: 5.0e-05
   weight_decay: 0.01
+
+early_stopping: true
+early_stopping_kwargs:
+  min_delta: 0.001
+  patience: 5
+  mode: max
+  monitor: irt2/inductive/all micro hits@10

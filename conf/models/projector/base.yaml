@@ -47,19 +47,15 @@ mode: full
 
 # pytorch lightning
 
+# kgc/inductive/hits@10
+# irt2/inductive/all micro hits@10
+
 checkpoint:
   every_n_epochs: 1
   mode: max
-  monitor: kgc/inductive/hits@10
+  monitor: irt2/inductive/all micro hits@10
   save_last: true
   save_top_k: 1
-
-early_stopping: true
-early_stopping_kwargs:
-  min_delta: 0.001
-  patience: 5
-  mode: max
-  monitor: kgc/inductive/hits@10
 
 scheduler: constant
 scheduler_kwargs: {}

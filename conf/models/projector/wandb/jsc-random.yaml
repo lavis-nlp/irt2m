@@ -1,12 +1,11 @@
 # use the wandb agent to run the sweep
-# goal: ablation over different context sizes
-name: JSC Random
-description: First JSC random search
+name: JSC Random II - Tiny
+description: Second JSC random search
 project: irt2-projector
 
 method: random
 metric:
-  name: kgc/inductive/hits@10
+  name: irt2/inductive/all micro hits@10
   goal: maximize
 
 parameters:
@@ -21,6 +20,12 @@ parameters:
       - 10
       - 100
 
+  embedding-dim:
+    values:
+      - 200
+      - 500
+      - 800
+
   learning-rate:
     distribution: uniform
     min: 1e-6
@@ -33,7 +38,7 @@ parameters:
 
   weight-decay:
     distribution: log_uniform_values
-    min: 0.001
+    min: 0.0001
     max: 0.5
 
 

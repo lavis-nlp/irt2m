@@ -32,3 +32,10 @@ module:
 optimizer: adam
 optimizer_kwargs:
   lr: 1.0e-06
+
+early_stopping: true
+early_stopping_kwargs:
+  min_delta: 0.001
+  patience: 5
+  mode: max
+  monitor: irt2/inductive/all micro hits@10

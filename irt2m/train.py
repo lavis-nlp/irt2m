@@ -429,6 +429,7 @@ def _overwrite_config(config, **overwrites):
         ("learning_rate", "optimizer_kwargs.lr"),
         ("regularizer_weight", "model_kwargs.regularizer_kwargs.weight"),
         ("weight_decay", "optimizer_kwargs.weight_decay"),
+        ("embedding_dim", "model_kwargs.embedding_dim"),
     ]
 
     for key, trail in mapping:

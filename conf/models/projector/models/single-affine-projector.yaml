@@ -21,7 +21,7 @@ module:
   valid_ds: mention flat
   valid_ds_kwargs:
     seed: 5012022
-    max_contexts_per_sample: 100
+    max_contexts_per_sample: 10
     # masking: true
   valid_loader_kwargs:
     shuffle: false
@@ -31,3 +31,10 @@ module:
 optimizer: adam
 optimizer_kwargs:
   lr: 5.0e-05
+
+early_stopping: true
+early_stopping_kwargs:
+  min_delta: 0.001
+  patience: 15
+  mode: max
+  monitor: irt2/inductive/all micro hits@10
