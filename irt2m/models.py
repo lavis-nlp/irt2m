@@ -1243,12 +1243,21 @@ class JointProjector(Projector):
         # batch x embedding_dims
         encs, samples = self.forward((idxs, samples))
 
-        er = torch.LongTensor([[sample.ent, sample.rel] for sample in samples])
-        er = er.to(device=self.device)
+        # batch
+        r = torch.LongTensor([sample.rel for sample in samples])
+        r = r.to(device=self.device)
 
         # batch x embedding_dims
-        rels = self.relations(er[:, 1])
+        rels = self.relations(r)
         ents = self.entities(None)
+
+        # batch x num_entities
+        labels = torch.zeros((len(samples), len(ents)))
+        labels = labels.to(device=self.device)
+
+        for i, sample in enumerate(samples):
+            for j in sample.ents:
+                labels[i, j] = 1
 
         assert kind in {"head", "tail"}
         if kind == "head":
@@ -1259,7 +1268,7 @@ class JointProjector(Projector):
             scores = score(t=encs, r=rels, all_entities=ents)
 
         # scores: batch x num_entities
-        return scores, encs, samples, er
+        return scores, encs, samples, labels
 
     def training_step(
         self,
@@ -1276,13 +1285,13 @@ class JointProjector(Projector):
             h_idxs, h_samples, t_idxs, t_samples = subcollation
 
             # x: tuple of batch x embedding_dim
-            h_scores, h_encs, h_samples, hr = self._forward_directed(
+            h_scores, h_encs, h_samples, h_labels = self._forward_directed(
                 kind="head",
                 idxs=h_idxs,
                 samples=h_samples,
             )
 
-            t_scores, t_encs, t_samples, tr = self._forward_directed(
+            t_scores, t_encs, t_samples, t_labels = self._forward_directed(
                 kind="tail",
                 idxs=t_idxs,
                 samples=t_samples,
@@ -1291,12 +1300,7 @@ class JointProjector(Projector):
             samples = list(h_samples) + list(t_samples)
             encs = torch.cat((h_encs, t_encs))
             scores = torch.cat((h_scores, t_scores))
-            targets = torch.cat(
-                (
-                    hr[:, 0] if len(hr) else self.void_i,
-                    tr[:, 0] if len(tr) else self.void_i,
-                )
-            )
+            targets = torch.cat((h_labels, t_labels))
 
             score_loss = self.loss(scores, targets)
             score_losses.append(score_loss)

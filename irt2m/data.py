@@ -1078,25 +1078,31 @@ class TripleSample(ProjectorSample):
     # what the indexes represent
     kind: Literal["head", "tail"]
 
-    ent: VID
     rel: RID
+    ents: tuple[VID]
 
     def __str__(self) -> str:
-        ent = f"{self.irt2.vertices[self.ent]} (VID={self.ent})"
+        ent = self.ents[0]
+
+        ent = f"{self.irt2.vertices[ent]} (VID={ent}) (+{len(self.ents) - 1})"
         rel = f"{self.irt2.relations[self.rel]} (RID={self.rel})"
 
         return str(super()) + f"as {self.kind} of {rel} {ent}"
 
     @cached_property
     def description(self) -> str:
-        ent = f"{self.irt2.vertices[self.ent]} (VID={self.ent})"
-        rel = f"{self.irt2.relations[self.rel]} (RID={self.rel})"
-        txt = f">[text of {self.key}]<"
+        triples = ""
 
-        left, right = (txt, ent) if self.kind == "head" else (ent, txt)
+        for ent in self.ents:
+            ent = f"{self.irt2.vertices[ent]} (VID={ent})"
+            rel = f"{self.irt2.relations[self.rel]} (RID={self.rel})"
+            txt = f">[text of {self.key}]<"
 
-        triple = f"\n\nTriple: {left} {rel} {right}\n"
-        return super().description + triple
+            left, right = (txt, ent) if self.kind == "head" else (ent, txt)
+
+            triples += f"Triple: {left} {rel} {right}\n"
+
+        return super().description + f"\n\n{triples}"
 
 
 class VertexTripleRingbuffer(VertexDataset, RingDataset):
@@ -1104,7 +1110,7 @@ class VertexTripleRingbuffer(VertexDataset, RingDataset):
         return len(self._flat)
 
     def __getitem__(self, i):
-        key, kind, ent, rel = self._flat[i]
+        key, kind, ents, rel = self._flat[i]
 
         return TripleSample(
             # ProjectorSample
@@ -1113,7 +1119,7 @@ class VertexTripleRingbuffer(VertexDataset, RingDataset):
             indexes=self._get_indexes(key),
             # TripleSample
             kind=kind,
-            ent=ent,
+            ents=ents,
             rel=rel,
         )
 
@@ -1131,9 +1137,12 @@ class VertexTripleRingbuffer(VertexDataset, RingDataset):
                 continue
 
             if h in self.rings:
-                self._flat.append((h, "head", t, r))
+                tails = {v for _, v, _ in self.irt2.graph.select(heads={h}, edges={r})}
+                self._flat.append((h, "head", tuple(sorted(tails)), r))
+
             if t in self.rings:
-                self._flat.append((t, "tail", h, r))
+                heads = {v for v, _, _ in self.irt2.graph.select(tails={t}, edges={r})}
+                self._flat.append((t, "tail", tuple(sorted(heads)), r))
 
         log.info(
             f"created triple dataset with {len(self)} samples "
