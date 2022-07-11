@@ -62,9 +62,9 @@ scheduler_kwargs: {}
 
 trainer:
   gpus: 1
-  max_epochs: 200
+  max_epochs: 500
   # limit_train_batches: 1
   # limit_val_batches: 1
 
 wandb:
-  project: irt2-projector
+  project: irt2-projector-ng

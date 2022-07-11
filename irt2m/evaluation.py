@@ -445,10 +445,8 @@ class EvaluationResult:
 
         cached = self._init_projections(device, batch_size)
 
-        log.error(">>> force kgc evaluation")
-        self._run_kgc_evaluation(force=True)  # not cached)
-        log.error(">>> force ranking evaluation")
-        self._run_ranking_evaluation(force=True)  # not cached)
+        self._run_kgc_evaluation(force=not cached)
+        self._run_ranking_evaluation(force=not cached)
 
     # ---
 
@@ -581,7 +579,11 @@ def _prefix_row(result):
 
 
 def _config_row(result):
-    return _dic2row(
+    additional = {
+        "checkpoint": result.checkpoint.stem,
+    }
+
+    config = _dic2row(
         result.data.config,
         {
             "prefix": "prefix",
@@ -593,6 +595,8 @@ def _config_row(result):
             "epochs": "trainer.max_epochs",
         },
     )
+
+    return additional | config
 
 
 def _report_kgc_row(result):
@@ -647,6 +651,8 @@ def _report_ranking_row(result):
         "folder": str(result.data.path),
         "evaluated on": datetime.now().isoformat(),
     }
+
+    return row
 
 
 def create_report(folder: str):
