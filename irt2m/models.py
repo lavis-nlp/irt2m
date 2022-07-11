@@ -231,24 +231,20 @@ class IRT2Evaluator:
     def _add_to_ranks(self, queries, scores, ranks):
         # unfortunately, torch does not support fancy
         # indexing so we fall back to numpy
-        for i, (idx, rid) in enumerate(queries):
-            targets = np.arange(scores.shape[0], dtype=np.int64)
-            perm = np.argsort(scores[i])[::-1]
+
+        for (idx, rid), score_row in zip(queries, scores):
+            # targets = np.arange(scores.shape[0], dtype=np.int64)
+            perm = np.argsort(score_row)[::-1]
 
             # build reverse permutation of argsort for tracking
             rev = np.empty_like(perm, dtype=np.int64)
             rev[perm] = np.arange(len(rev))
 
-            # figure out where everybody went
-            task_positions = rev[targets]
-            task_scores = scores[i][targets]
-
-            # TODO smarter re-using perm instead of sorted?
-            preds = zip(targets, task_positions, task_scores)
-            preds = ((int(t), int(p), float(s)) for t, p, s in preds)
+            # build (sorted) prediction triples: (VID, position, score)
+            task = self.kgc.idx2mid[idx], rid
+            preds = ((vid, rev[vid], score_row[vid]) for vid in ranks.gt[task])
             preds = sorted(preds, key=lambda t: t[2], reverse=True)
 
-            task = self.kgc.idx2mid[idx], rid
             ranks.add(task, *preds)
 
     # -- scoring
@@ -262,7 +258,7 @@ class IRT2Evaluator:
         ranks: irt2.evaluation.Ranks,
         tqdm_kwargs,
     ) -> irt2.evaluation.Prediction:
-        log.info(f"scoring {queries.shape[0]} x {cands.shape[0]} candidates")
+        log.info(f"scoring {kind=}: {queries.shape[0]} x {cands.shape[0]} candidates")
 
         E = model.entity_representations[0]
         R = model.relation_representations[0]
@@ -276,12 +272,15 @@ class IRT2Evaluator:
         for i in tqdm(gen, total=total, **tqdm_kwargs):
             j = i + self.batch_size
             q = queries[i:j]
+            e, r = E(q[:, 0]), R(q[:, 1])
 
-            scores = model.interaction.score_t(
-                h=E(q[:, 0]),
-                r=R(q[:, 1]),
-                all_entities=cands,
-            )
+            # kgc 'head' task: do head prediction
+            if kind == "head":
+                scores = model.interaction.score_h(t=e, r=r, all_entities=cands)
+
+            # kgc 'tail' task: do tail prediction
+            if kind == "tail":
+                scores = model.interaction.score_t(h=e, r=r, all_entities=cands)
 
             scores = scores.detach().cpu().numpy()
             q = q.tolist()

@@ -134,20 +134,6 @@ class ProjectorData:
         for glob in path.glob("checkpoints/*ckpt"):
             self.checkpoints.append(glob)
 
-        # path_kgc_results = path / SUBDIR / "kgc.metrics.yaml"
-        # self.kgc_results = {}
-        # if path_kgc_results.exists():
-        #     log.info("found and loading kgc results")
-        #     with path_kgc_results.open(mode="r") as fd:
-        #         self.kgc_results = yaml.safe_load(fd)
-
-        # path_ranking_results = path / SUBDIR / "ranking.metrics.yaml"
-        # self.ranking_results = {}
-        # if path_ranking_results.exists():
-        #     log.info("found and loading ranking results")
-        #     with path_ranking_results.open(mode="r") as fd:
-        #         self.ranking_results = yaml.safe_load(fd)
-
         log.info(f"loaded {self}")
 
     # ---
@@ -458,8 +444,11 @@ class EvaluationResult:
             batch_size = self.data.config["module"]["valid_loader_kwargs"]["batch_size"]
 
         cached = self._init_projections(device, batch_size)
-        self._run_kgc_evaluation(force=not cached)
-        self._run_ranking_evaluation(force=not cached)
+
+        log.error(">>> force kgc evaluation")
+        self._run_kgc_evaluation(force=True)  # not cached)
+        log.error(">>> force ranking evaluation")
+        self._run_ranking_evaluation(force=True)  # not cached)
 
     # ---
 
@@ -565,7 +554,10 @@ def projector(
         checkpoint=checkpoint,
     )
 
+    print("\nKGC TASK")
     print(result.kgc_table)
+
+    print("\nRanking TASK")
     print(result.ranking_table)
 
 
@@ -581,11 +573,35 @@ def _irt2row(dic, key, *contains):
     }
 
 
+def _prefix_row(result):
+    return {
+        "irt2": result.irt2.name,
+        "model": result.model.__class__.__name__,
+    }
+
+
+def _config_row(result):
+    return _dic2row(
+        result.data.config,
+        {
+            "prefix": "prefix",
+            "date": "timestamp",
+            "contexts per sample": "module.train_ds_kwargs.max_contexts_per_sample",
+            "contexts per batch": "module.train_ds_kwargs.contexts_per_sample",
+            "batch size": "module.train_loader_kwargs.batch_size",
+            "subbatch size": "module.train_loader_kwargs.subbatch_size",
+            "epochs": "trainer.max_epochs",
+        },
+    )
+
+
 def _report_kgc_row(result):
     row = {}
 
+    row |= _prefix_row(result)
     row |= _irt2row(result.kgc_results, "irt2_test", "micro")
     row |= _irt2row(result.kgc_results, "irt2_inductive", "micro")
+    row |= _config_row(result)
 
     kgcrow = _dic2row(
         result.kgc_results,
@@ -600,21 +616,7 @@ def _report_kgc_row(result):
             "kgc_train h@10": "kgc_train.both.realistic.hits_at_10",
         },
     )
-
     row |= {k: v * 100 for k, v in kgcrow.items()}
-
-    row |= _dic2row(
-        result.data.config,
-        {
-            "prefix": "prefix",
-            "date": "timestamp",
-            "contexts per sample": "module.train_ds_kwargs.max_contexts_per_sample",
-            "contexts per batch": "module.train_ds_kwargs.contexts_per_sample",
-            "batch size": "module.train_loader_kwargs.batch_size",
-            "subbatch size": "module.train_loader_kwargs.subbatch_size",
-            "epochs": "trainer.max_epochs",
-        },
-    )
 
     row |= _irt2row(result.kgc_results, "irt2_test", "macro")
     row |= _irt2row(result.kgc_results, "irt2_inductive", "macro")
@@ -632,9 +634,10 @@ def _report_kgc_row(result):
 def _report_ranking_row(result):
     row = {}
 
+    row |= _prefix_row(result)
     row |= _irt2row(result.ranking_results, "irt2_test", "micro")
     row |= _irt2row(result.ranking_results, "irt2_inductive", "micro")
-
+    row |= _config_row(result)
     row |= _irt2row(result.ranking_results, "irt2_test", "macro")
     row |= _irt2row(result.ranking_results, "irt2_inductive", "macro")
 
@@ -660,7 +663,7 @@ def create_report(folder: str):
         print(textwrap.indent(str(result), prefix="  - "))
 
         scenarios["kgc"].append(_report_kgc_row(result))
-        scenarios["ranking"].append(_report_kgc_row(result))
+        scenarios["ranking"].append(_report_ranking_row(result))
 
     for scenario, rows in scenarios.items():
         out = folder / f"{scenario}.summary.csv"
