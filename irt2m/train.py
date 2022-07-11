@@ -423,6 +423,7 @@ def _init_callbacks(config, debug):
 def _overwrite_config(config, **overwrites):
     mapping = [
         ("max_contexts_per_sample", "module.train_ds_kwargs.max_contexts_per_sample"),
+        ("max_contexts_per_sample", "module.valid_ds_kwargs.max_contexts_per_sample"),
         ("masked", "module.train_ds_kwargs.masking"),
         ("masked", "module.valid_ds_kwargs.masking"),
         ("epochs", "trainer.max_epochs"),
