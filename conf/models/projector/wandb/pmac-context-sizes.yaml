@@ -2,7 +2,7 @@
 # goal: ablation over different context sizes
 name: PMAC Full
 description: Full run for all PMAC combinations
-project: irt2-projector
+project: irt2-projector-ng
 
 method: grid
 metric:

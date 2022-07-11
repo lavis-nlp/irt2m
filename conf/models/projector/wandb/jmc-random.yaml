@@ -2,7 +2,7 @@
 # goal: ablation over different context sizes
 name: JMC Random CDE-T
 description: First JMC random search
-project: irt2-projector
+project: irt2-projector-ng
 
 method: random
 metric:

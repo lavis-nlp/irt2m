@@ -2,7 +2,7 @@
 # goal: ablation over different context sizes
 name: PSAC Full
 description: Full run for all PSAC combinations
-project: irt2-projector
+project: irt2-projector-ng
 
 method: grid
 metric:
