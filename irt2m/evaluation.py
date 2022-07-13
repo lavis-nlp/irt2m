@@ -62,14 +62,21 @@ class ProjectorData:
     def description(self):
         header = str(self)
         checkpoints = "\n".join([f"  - {path.stem}" for path in self.checkpoints])
+        legacy = "irt2_inductive" not in self.validation
 
-        tablehead = "train", "transductive", "inductive"
+        tablehead = "kgc_train", "kgc_transductive", "kgc_inductive"
+        if not legacy:
+            tablehead += ("irt2_inductive",)
+
         tablerows = []
         for key in self.validation[tablehead[0]]:
             row = tuple(hits(self.validation[kind][key], k=10) for kind in tablehead)
             tablerows.append(key + row)
 
-        tablerows.sort(key=lambda t: t[4], reverse=True)  # dsc by h@10
+        # kgc_inductive if legacy else irt2_inductive
+        sortkey = 4 if legacy else 5
+
+        tablerows.sort(key=lambda t: t[sortkey], reverse=True)  # dsc by h@10
         # tablerows.sort(key=lambda t: (t[0], t[1]))  # asc by epoch, step
         tablerows = tablerows[:5]
 
@@ -102,12 +109,50 @@ class ProjectorData:
     def __str__(self):
         timestamp = datetime.fromisoformat(self.config["timestamp"])
         prefix = self.config["prefix"]
-        h10, epoch, total = self.best("inductive")
+
+        # kgc_inductive: legacy (can be removed later)
+        key = "irt2_inductive"
+        key = key if key in self.validation else "kgc_inductive"
+
+        h10, epoch, total = self.best(key)
 
         return (
             f"Projectors {prefix} {timestamp}"
             f" (best h@10: {h10:2.3f} at epoch {epoch}/{total})"
         )
+
+    def _init_legacy_validation(self):
+        validation = {"train": {}, "transductive": {}, "inductive": {}}
+
+        log.info("falling back to legacy validation metrics")
+        for glob in self.path.glob("kgc/*yaml"):
+            # expecting file names like epoch=0-step=0_inductive.yaml
+            _, epoch, _, step, kind = re.split(r"[=\-_]", glob.stem)
+            with glob.open(mode="r") as fd:
+                key = int(epoch), int(step)
+                validation[kind][key] = yaml.safe_load(fd)
+
+        self.validation = {f"kgc_{k}": v for k, v in validation.items()}
+
+    def _init_validation(self):
+        path = self.path / "validation"
+
+        if not path.is_dir():
+            self._init_legacy_validation()
+            return
+
+        self.validation = defaultdict(dict)
+        for glob in path.glob("*.yaml"):
+            # expecting file names like epoch=0-step=0.yaml
+            _, epoch, _, step = re.split(r"[=\-_]", glob.stem)
+            key = int(epoch), int(step)
+
+            with glob.open(mode="r") as fd:
+                results = yaml.safe_load(fd)
+                for kind, metrics in results.items():
+                    self.validation[kind][key] = metrics
+
+        self.validation = dict(self.validation)
 
     def __init__(self, path: Path):
         log.info(f"initializing trained projectors from {path}")
@@ -120,14 +165,7 @@ class ProjectorData:
             self.config = yaml.safe_load(fd)
             _apply_backports(self.config)
 
-        # load all validation results (which were PyKEEN RankingResults)
-        self.validation = {"train": {}, "transductive": {}, "inductive": {}}
-        for glob in path.glob("kgc/*yaml"):
-            # expecting file names like epoch=0-step=0_inductive.yaml
-            _, epoch, _, step, kind = re.split(r"[=\-_]", glob.stem)
-            with glob.open(mode="r") as fd:
-                key = int(epoch), int(step)
-                self.validation[kind][key] = yaml.safe_load(fd)
+        self._init_validation()
 
         # there's always a "last.ckpt" which we can fall back to
         self.checkpoints = []
@@ -142,7 +180,13 @@ class ProjectorData:
         checkpoints = self.path / "checkpoints"
 
         if checkpoint is None:
-            _, epoch, _ = self.best("inductive")
+
+            # legacy: can be removed later
+            key = "irt2_inductive"
+            key = key if key in self.validation else "kgc_inductive"
+
+            _, epoch, _ = self.best(key)
+
             globs = list(checkpoints.glob(f"epoch={epoch}*.ckpt"))
             path = globs[0] if len(globs) == 1 else checkpoints / "last.ckpt"
 
