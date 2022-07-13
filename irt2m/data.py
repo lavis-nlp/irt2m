@@ -1075,7 +1075,7 @@ class MentionFlatDataset(MentionDataset, FlatDataset):
 @dataclass(frozen=True)
 class TripleSample(ProjectorSample):
 
-    # what the indexes represent
+    # what the _indexes_ represent
     kind: Literal["head", "tail"]
 
     rel: RID
@@ -1093,7 +1093,9 @@ class TripleSample(ProjectorSample):
     def description(self) -> str:
         triples = ""
 
-        for ent in self.ents:
+        n = 5
+        total = len(self.ents)
+        for ent in self.ents[:n]:
             ent = f"{self.irt2.vertices[ent]} (VID={ent})"
             rel = f"{self.irt2.relations[self.rel]} (RID={self.rel})"
             txt = f">[text of {self.key}]<"
@@ -1102,6 +1104,7 @@ class TripleSample(ProjectorSample):
 
             triples += f"Triple: {left} {rel} {right}\n"
 
+        triples += f" + {max(0, total - n)} more"
         return super().description + f"\n\n{triples}"
 
 
