@@ -83,6 +83,26 @@ def f_reduce_multi(
     return pooled, [keys[key] for key in unique_keys]
 
 
+def f_score(
+    direction: Literal["head", "tail"],
+    scorer: pykeen.models.ERModel,
+    ents: torch.Tensor,
+    rels: torch.Tensor,
+    targets: torch.Tensor,
+):
+    assert direction in {"head", "tail"}
+
+    if direction == "head":
+        score = scorer.interaction.score_h
+        scores = score(t=ents, r=rels, all_entities=targets)
+
+    if direction == "tail":
+        score = scorer.interaction.score_t
+        scores = score(h=ents, r=rels, all_entities=targets)
+
+    return scores
+
+
 # --
 
 
@@ -274,15 +294,16 @@ class IRT2Evaluator:
             q = queries[i:j]
             e, r = E(q[:, 0]), R(q[:, 1])
 
-            # kgc 'head' task: do head prediction
-            if kind == "head":
-                scores = model.interaction.score_h(t=e, r=r, all_entities=cands)
-
-            # kgc 'tail' task: do tail prediction
-            if kind == "tail":
-                scores = model.interaction.score_t(h=e, r=r, all_entities=cands)
+            scores = f_score(
+                direction=kind,
+                scorer=model,
+                ents=e,
+                rels=r,
+                targets=cands,
+            )
 
             scores = scores.detach().cpu().numpy()
+
             q = q.tolist()
 
             self._add_to_ranks(q, scores, ranks)
@@ -1158,6 +1179,7 @@ class JointProjector(Projector):
         irt2: IRT2,
         config: dict,
         *args,
+        loss: str = None,
         embedding_dim: int = None,
         regularizer: str,
         regularizer_kwargs: dict,
@@ -1171,7 +1193,12 @@ class JointProjector(Projector):
             out_features=embedding_dim * 2,
         )
 
-        self.loss = torch.nn.CrossEntropyLoss()
+        Loss = {
+            "cross entropy": torch.nn.CrossEntropyLoss,
+            "binary cross entropy": torch.nn.BCEWithLogitsLoss,
+        }[loss or "cross entropy"]
+        self.loss = Loss()
+        log.info(f"using {self.loss.__class__.__name__} as loss")
 
         self.scorer = pykeen.models.unimodal.ComplEx(
             embedding_dim=embedding_dim,
@@ -1232,12 +1259,12 @@ class JointProjector(Projector):
 
             yield t1 + t2
 
-    def _forward_directed(self, kind: Literal["head", "tail"], idxs, samples):
+    def _forward_directed(self, direction: Literal["head", "tail"], idxs, samples):
         if not samples:
             return self.void_f, self.void_c, [], self.void_i
 
-        # if kind == head: heads are encoded text
-        # if kind == tail: tails are encoded text
+        # if kind == tail: heads are encoded text
+        # if kind == head: tails are encoded text
 
         # batch x embedding_dims
         encs, samples = self.forward((idxs, samples))
@@ -1251,6 +1278,9 @@ class JointProjector(Projector):
         ents = self.entities(None)
 
         # batch x num_entities
+        scores = f_score(direction, self.scorer, encs, rels, ents)
+
+        # batch x num_entities
         labels = torch.zeros((len(samples), len(ents)))
         labels = labels.to(device=self.device)
 
@@ -1258,15 +1288,6 @@ class JointProjector(Projector):
             for j in sample.ents:
                 labels[i, j] = 1
 
-        assert kind in {"head", "tail"}
-        if kind == "head":
-            score = self.scorer.interaction.score_t
-            scores = score(h=encs, r=rels, all_entities=ents)
-        if kind == "tail":
-            score = self.scorer.interaction.score_h
-            scores = score(t=encs, r=rels, all_entities=ents)
-
-        # scores: batch x num_entities
         return scores, encs, samples, labels
 
     def training_step(
@@ -1285,13 +1306,13 @@ class JointProjector(Projector):
 
             # x: tuple of batch x embedding_dim
             h_scores, h_encs, h_samples, h_labels = self._forward_directed(
-                kind="head",
+                direction="tail",  # we want to do tail prediction
                 idxs=h_idxs,
                 samples=h_samples,
             )
 
             t_scores, t_encs, t_samples, t_labels = self._forward_directed(
-                kind="tail",
+                direction="head",  # we want to do head prediction
                 idxs=t_idxs,
                 samples=t_samples,
             )
