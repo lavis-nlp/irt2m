@@ -2,7 +2,7 @@
 model: single context complex joint
 model_kwargs:
   embedding_dim: 500
-  loss: binary cross entropy
+  loss: cross entropy
   regularizer: LPRegularizer
   regularizer_kwargs:
     p: 2.0
@@ -19,7 +19,7 @@ module:
   train_ds_kwargs:
     seed: 5012022
     contexts_per_sample: 1  # per batch
-    max_contexts_per_sample: 10
+    max_contexts_per_sample: 1
   train_loader_kwargs:
     shuffle: true
     batch_size: 4
@@ -28,7 +28,7 @@ module:
   valid_ds_kwargs:
     seed: 5012022
     contexts_per_sample: 1
-    max_contexts_per_sample: 10
+    max_contexts_per_sample: 1
   valid_loader_kwargs:
     shuffle: false
     batch_size: 20

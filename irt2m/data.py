@@ -1130,7 +1130,7 @@ class VertexTripleRingbuffer(VertexDataset, RingDataset):
         log.info("create >[vertex triple ringbuffer]< dataset")
         super().__init__(*args, **kwargs)
 
-        self._flat = []
+        flat = set()
         skipped = 0
 
         # h: VID, t: VID, r: RID
@@ -1141,11 +1141,13 @@ class VertexTripleRingbuffer(VertexDataset, RingDataset):
 
             if h in self.rings:
                 tails = {v for _, v, _ in self.irt2.graph.select(heads={h}, edges={r})}
-                self._flat.append((h, "head", tuple(sorted(tails)), r))
+                flat.add((h, "head", tuple(sorted(tails)), r))
 
             if t in self.rings:
                 heads = {v for v, _, _ in self.irt2.graph.select(tails={t}, edges={r})}
-                self._flat.append((t, "tail", tuple(sorted(heads)), r))
+                flat.add((t, "tail", tuple(sorted(heads)), r))
+
+        self._flat = list(flat)
 
         log.info(
             f"created triple dataset with {len(self)} samples "
