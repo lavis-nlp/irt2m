@@ -1133,6 +1133,8 @@ class VertexTripleRingbuffer(VertexDataset, RingDataset):
         flat = set()
         skipped = 0
 
+        # TODO np.uniq + coo matrix like pykeen
+
         # h: VID, t: VID, r: RID
         for h, t, r in self.irt2.closed_triples:
             if h not in self.keys or t not in self.keys:
