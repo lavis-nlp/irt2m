@@ -263,7 +263,7 @@ class IRT2Evaluator:
             # build (sorted) prediction triples: (VID, position, score)
             task = self.kgc.idx2mid[idx], rid
             preds = ((vid, rev[vid], score_row[vid]) for vid in ranks.gt[task])
-            preds = sorted(preds, key=lambda t: t[2], reverse=True)
+            preds = sorted(preds, key=lambda t: (-t[2], t[1]))  # score desc, pos asc
 
             ranks.add(task, *preds)
 
