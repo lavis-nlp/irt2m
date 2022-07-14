@@ -13,12 +13,6 @@ encoder: bert-base-cased
 #   projector: as defined
 out: data/models/{prefix}/{date}
 
-# which kgc evaluations to run while training
-evaluations:
-  - kgc/train         # closed world kgc with original embeddings (run once before training)
-  - kgc/transductive  # closed world kgc with projections (irt2.closed_triples)
-  - kgc/inductive     # open world kgc with projections (irt2.open_kgc_val*)
-  - irt2/inductive    # official irt2 evaluation
 
 evaluations_kwargs:
   irt2:

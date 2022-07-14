@@ -283,7 +283,6 @@ class IRT2Evaluator:
         E = model.entity_representations[0]
         R = model.relation_representations[0]
 
-        results = {}
         batches = range(0, len(queries), self.batch_size)
 
         gen = islice(batches, self.limit)
@@ -308,8 +307,6 @@ class IRT2Evaluator:
 
             self._add_to_ranks(q, scores, ranks)
             self._write_scores(kind, i, j, q, scores)
-
-        return results
 
     def evaluate(
         self,
@@ -657,6 +654,7 @@ class Projector(pl.LightningModule):
 
         evaluator, kwargs = initializer(which, limit, evaluator_kwargs)
         results = self.evaluate_kgc(evaluator, which, **kwargs)
+
         return results
 
     def _log_kgc_results(self, which: Evaluation, results):
