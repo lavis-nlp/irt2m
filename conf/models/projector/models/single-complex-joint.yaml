@@ -9,6 +9,13 @@ model_kwargs:
     weight: 0.1
     normalize: true
 
+
+# which kgc evaluations to run while training
+evaluations:
+  - kgc/inductive     # open world kgc with projections (irt2.open_kgc_val*)
+  - irt2/inductive    # official irt2 evaluation
+
+
 # for available datasets see irt2m.data.PROJECTOR_DATASETS
 #   and their respective __init__ methods for *ds_kwargs
 #
