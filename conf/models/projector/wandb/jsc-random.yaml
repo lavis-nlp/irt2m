@@ -1,6 +1,6 @@
 # use the wandb agent to run the sweep
-name: JSC Random II - Tiny
-description: Second JSC random search
+name: JSC Random II - Tiny (Vertex Entity Ringbuffer)
+description: Third JSC random search
 project: irt2-projector-ng
 
 method: random

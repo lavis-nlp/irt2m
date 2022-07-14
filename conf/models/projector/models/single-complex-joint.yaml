@@ -22,7 +22,7 @@ evaluations:
 # contexts_per_sample is the amount of text contexts
 # subbatch_size is batch_size if None
 module:
-  train_ds: vertex triple ringbuffer
+  train_ds: vertex entity ringbuffer
   train_ds_kwargs:
     seed: 5012022
     contexts_per_sample: 1  # per batch
@@ -49,6 +49,6 @@ optimizer_kwargs:
 early_stopping: true
 early_stopping_kwargs:
   min_delta: 0.001
-  patience: 15
+  patience: 30
   mode: max
   monitor: irt2/inductive/all micro hits@10

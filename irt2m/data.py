@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Load irt2 as a torchdata dataset."""
 
+import dataclasses
 import gzip
 import logging
 import pickle
@@ -1164,7 +1165,104 @@ class VertexTripleRingbuffer(VertexDataset, RingDataset):
 
         header = textwrap.dedent(
             f"""
-            Vertex Triple Ringbuffer with ({len(self)} triples)
+            VERTEX TRIPLE RINGBUFFER with ({len(self)} triples)
+            Example Sample {idx}: {self.irt2.vertices[vid]} ({vid=}):
+            """
+        )
+
+        body = textwrap.indent(sample.description, prefix="  ")
+        return header + body
+
+    @staticmethod
+    def collate_fn(
+        batch: list[TripleSample],
+    ) -> tuple[torch.Tensor, ..., list[TripleSample]]:
+        """Batch samples."""
+
+        h, t = [], []
+        for sample in batch:
+            dest = h if sample.kind == "head" else t
+            dest.append(sample)
+
+        def collate(batch):
+            if len(batch) == 0:
+                return torch.zeros(0), []
+
+            _, padded, samples = RingDataset.collate_fn(batch)
+            return padded, samples
+
+        th, h_samples = collate(h)
+        tt, t_samples = collate(t)
+
+        def transfer(collation, device):
+            th, h_samples, tt, t_samples = collation
+
+            return (
+                th.to(device=device),
+                h_samples,
+                tt.to(device=device),
+                t_samples,
+            )
+
+        return transfer, th, h_samples, tt, t_samples
+
+
+class VertexEntityRingbuffer(VertexDataset, RingDataset):
+    """Samples vertices and a single associated triple."""
+
+    def _init_triple_rings(self):
+        log.info(f"initialize triple rings from {len(self)} keys")
+
+        rings = defaultdict(list)
+
+        agg = defaultdict(set)
+        for vid in self.keys:
+            for h, t, r in self.irt2.graph.find(heads={vid}, tails={vid}):
+                if h == vid:
+                    kind, key, target = "head", h, t
+                elif t == vid:
+                    kind, key, target = "tail", t, h
+
+                agg[(kind, key, r)].add(target)
+
+        log.info("building rings")
+        for (kind, key, rel), targets in agg.items():
+            rings[key].append((kind, rel, tuple(targets)))
+
+        log.info("shuffle associated triples")
+        self.triple_rings = {}
+        for key, ring in rings.items():
+            ring.sort()
+            random.shuffle(ring)
+            self.triple_rings[key] = deque(ring)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._init_triple_rings()
+
+    def __getitem__(self, i: int) -> TripleSample:
+        sample = super().__getitem__(i)
+
+        ring = self.triple_rings[sample.key]
+        kind, rel, ents = ring[0]
+        ring.rotate()
+
+        return TripleSample(
+            kind=kind,
+            rel=rel,
+            ents=ents,
+            **dataclasses.asdict(sample),
+        )
+
+    @property
+    def description(self) -> str:
+        idx = random.randint(0, len(self))
+        sample = self[idx]
+        vid = sample.key
+
+        header = textwrap.dedent(
+            f"""
+            VERTEX ENTITY RINGBUFFER with ({len(self)} entities)
             Example Sample {idx}: {self.irt2.vertices[vid]} ({vid=}):
             """
         )
@@ -1209,6 +1307,7 @@ class VertexTripleRingbuffer(VertexDataset, RingDataset):
 PROJECTOR_DATASETS = {
     "vertex ringbuffer": VertexRingDataset,
     "vertex triple ringbuffer": VertexTripleRingbuffer,
+    "vertex entity ringbuffer": VertexEntityRingbuffer,
     "vertex flat": VertexFlatDataset,
     "mention ringbuffer": MentionRingDataset,
     "mention flat": MentionFlatDataset,
