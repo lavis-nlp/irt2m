@@ -431,15 +431,16 @@ def _overwrite_config(config, **overwrites):
         ("regularizer_weight", "model_kwargs.regularizer_kwargs.weight"),
         ("weight_decay", "optimizer_kwargs.weight_decay"),
         ("embedding_dim", "model_kwargs.embedding_dim"),
+        ("freeze_except", "model_kwargs.freeze_except"),
     ]
 
-    for key, trail in mapping:
-        if key in overwrites and overwrites[key] is not None:
+    for cli_opt, trail in mapping:
+        if cli_opt in overwrites and overwrites[cli_opt] is not None:
 
-            opt = drslv(config, trail, skiplast=1)
-            opt[trail.split(".")[-1]] = overwrites[key]
+            opt = drslv(config, trail, sep=".", skiplast=1)
+            opt[trail.split(".")[-1]] = overwrites[cli_opt]
 
-            log.info(f"overwrite >[{trail}]< with {overwrites[key]}")
+            log.info(f"overwrite >[{trail}]< with {overwrites[cli_opt]}")
 
 
 def _set_mode(config):

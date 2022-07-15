@@ -62,4 +62,4 @@ trainer:
   # limit_val_batches: 1
 
 wandb:
-  project: irt2-projector-ng
+  project: irt2-projector

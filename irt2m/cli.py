@@ -174,6 +174,13 @@ def train_kgc(**kwargs):
     required=False,
     help="overwrites the models embedding dim (joint only)",
 )
+@click.option(
+    "--freeze-except",
+    type=int,
+    default=None,
+    required=False,
+    help="freeze all but the last N layers of the encoder",
+)
 def train_projector(**kwargs):
     """Train a projector that maps text to KGC vertices."""
     train.projector(**kwargs)

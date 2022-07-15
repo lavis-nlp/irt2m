@@ -7,7 +7,7 @@ import sys
 from contextlib import contextmanager
 from itertools import count, groupby, islice, zip_longest
 from pathlib import Path
-from typing import Literal, Union
+from typing import Literal, Optional, Union
 
 import h5py
 import irt2.evaluation
@@ -494,12 +494,26 @@ class Projector(pl.LightningModule):
 
         return error
 
+    def freeze_encoder(self, except_last):
+        if except_last is None:
+            log.info("not freezing any layers of the encoder")
+            return
+
+        log.info(f"freezing all but the last {except_last} layers of the encoder")
+
+        mods = [self.encoder.embeddings]
+        mods += self.encoder.encoder.layer[:-except_last]
+
+        for mod in mods:
+            for param in mod.parameters():
+                param.requires_grad = False
+
     def __init__(
         self,
         irt2: IRT2,
         config: data.Config,
         tokenizer: tf.BertTokenizer,
-        freeze_encoder: bool = False,
+        freeze_except: Optional[int] = None,
     ):
         super().__init__()
 
@@ -517,9 +531,7 @@ class Projector(pl.LightningModule):
             cache_dir=irt2m.ENV.DIR.CACHE / "lib.transformers",
         )
 
-        if freeze_encoder:
-            log.info("! freezing text encoder")
-            self.encoder.requires_grad_(False)
+        self.freeze_encoder(freeze_except)
 
     def configure_optimizers(self):
         optimizer = OPTIMIZER[self.config["optimizer"]](

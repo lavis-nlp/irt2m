@@ -1,7 +1,7 @@
 # use the wandb agent to run the sweep
-name: JSC Random II - Tiny (Vertex Entity Ringbuffer)
-description: Third JSC random search
-project: irt2-projector-ng
+name: JSC Random Sweep - Tiny
+description: What is love?
+project: irt2-projector
 
 method: random
 metric:
@@ -20,12 +20,6 @@ parameters:
       - 10
       - 100
 
-  embedding-dim:
-    values:
-      - 200
-      - 500
-      - 800
-
   learning-rate:
     distribution: uniform
     min: 1e-6
@@ -36,11 +30,23 @@ parameters:
     min: 0.001
     max: 1
 
+  embedding-dim:
+    values:
+      - 200
+      - 500
+      - 800
+
   weight-decay:
     distribution: log_uniform_values
     min: 0.0001
     max: 0.5
 
+  freeze-except:
+    values:
+      - 0
+      - 1
+      - 5
+      - 11
 
 program: irt2m
 command:
