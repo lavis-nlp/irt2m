@@ -25,11 +25,13 @@ evaluations_kwargs:
 #      - logger is disabled
 #      - no data is written to disk
 #    limited:
-#      - run 10 batches per validation and train
-#      - evaluate 10 triples in kgc evaluation
-#      - evaluate 10 batches in irt2 evaluation
+#      - adjust numbers in train.py:
+#        - run some batches per validation and train
+#        - evaluate N triples in kgc evaluation and irt2 evaluation
+#        - run for M epochs
 #      - logger is disabled
 #      - no data is written to disk
+#      - profiling is active
 #    full
 #      - run all batches
 #      - logging to wandb

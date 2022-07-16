@@ -451,9 +451,9 @@ def _set_mode(config):
         trainconf["fast_dev_run"] = True
 
     if config["mode"] == "limited":
-        N = 10
-        trainconf["limit_train_batches"] = N
-        trainconf["limit_val_batches"] = N
+        trainconf["limit_train_batches"] = 500
+        trainconf["limit_val_batches"] = 10
+        trainconf["max_epochs"] = 2
 
 
 def projector(config: list[str], **overwrites):
@@ -510,6 +510,17 @@ def projector(config: list[str], **overwrites):
         deterministic=True,
     )
 
+    if config["mode"] == "limited":
+        profile_path = irt2m.ENV.DIR.DATA / "profile"
+        log.info(f"adding profiler {profile_path}")
+
+        trainer_kwargs |= dict(
+            profiler=pl.profiler.AdvancedProfiler(
+                dirpath=str(profile_path.parent),
+                filename=profile_path.name,
+            )
+        )
+
     trainer = pl.Trainer(**trainer_kwargs)
 
     # config was augmented and rewritten with cached data
@@ -522,3 +533,6 @@ def projector(config: list[str], **overwrites):
     log.info("--- rise, if you would")
 
     fit(trainer, model, datamodule, debug)
+
+    if config["mode"] == "limited":
+        print(f"profiling results: {profile_path}")
