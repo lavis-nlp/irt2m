@@ -126,6 +126,12 @@ def train_kgc(**kwargs):
 )
 # config overwrites
 @click.option(
+    "--mode",
+    type=str,
+    required=False,
+    help="training mode",
+)
+@click.option(
     "--epochs",
     type=int,
     multiple=False,

@@ -422,6 +422,7 @@ def _init_callbacks(config, debug):
 # see cli.train_projector
 def _overwrite_config(config, **overwrites):
     mapping = [
+        ("mode", "mode"),
         ("max_contexts_per_sample", "module.train_ds_kwargs.max_contexts_per_sample"),
         ("max_contexts_per_sample", "module.valid_ds_kwargs.max_contexts_per_sample"),
         ("masked", "module.train_ds_kwargs.masking"),
