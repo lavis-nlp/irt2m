@@ -29,7 +29,7 @@ module:
     max_contexts_per_sample: 1
   train_loader_kwargs:
     shuffle: true
-    batch_size: 4
+    batch_size: 8
 
   valid_ds: mention flat
   valid_ds_kwargs:
@@ -38,7 +38,7 @@ module:
     max_contexts_per_sample: 1
   valid_loader_kwargs:
     shuffle: false
-    batch_size: 20
+    batch_size: 60
 
 # for available optimizers see irt2m.models.OPTIMIZERS
 optimizer: adam
@@ -49,6 +49,6 @@ optimizer_kwargs:
 early_stopping: true
 early_stopping_kwargs:
   min_delta: 0.001
-  patience: 30
+  patience: 5
   mode: max
   monitor: irt2/inductive/all micro hits@10

@@ -16,7 +16,7 @@ out: data/models/{prefix}/{date}
 
 evaluations_kwargs:
   irt2:
-    batch_size: 50
+    batch_size: 200
 
 # there are three modes:
 #    probe:
@@ -47,7 +47,7 @@ mode: full
 # irt2/inductive/all micro hits@10
 
 checkpoint:
-  every_n_epochs: 1
+  every_n_epochs: 3
   mode: max
   monitor: irt2/inductive/all micro hits@10
   save_last: true
@@ -58,10 +58,9 @@ scheduler_kwargs: {}
 
 trainer:
   gpus: 1
-
   max_epochs: 500
-  # limit_train_batches: 1
-  # limit_val_batches: 1
+  check_val_every_n_epoch: 3
+
 
 wandb:
   project: irt2-projector

@@ -23,8 +23,7 @@ module:
     # masking: true
   train_loader_kwargs:
     shuffle: true
-    batch_size: 10
-    subbatch_size: 10
+    batch_size: 8
 
   valid_ds: mention flat
   valid_ds_kwargs:
@@ -33,7 +32,7 @@ module:
     # masking: true
   valid_loader_kwargs:
     shuffle: false
-    batch_size: 30
+    batch_size: 60
 
 # for available optimizers see irt2m.models.OPTIMIZERS
 optimizer: adam
