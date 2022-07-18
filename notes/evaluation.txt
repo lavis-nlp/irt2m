@@ -1,0 +1,65 @@
+
+  EVALUATION DATASETS
+
+  16.07.2022 - fixing the test text data
+
+  randomly:
+    *-ranking: draw 10% from all test texts
+    *-kgc: draw 100 of each mention
+
+
+
+RANKING SUBSET
+==============
+
+cd <SPLIT>
+chmod u+w ./ open.test-contexts.txt.gz
+mv open.test-contexts.txt.gz open.test-contexts.txt.gz.bak
+zcat open.test-contexts.txt.gz.bak | shuf | head -n 400000 | gzip > open.test-contexts.txt.gz
+chmod u-w ./ *
+zcat open.test-contexts.txt.gz | wc -l
+
+
+KGC SUBSET
+==========
+
+BASH
+----
+
+cd <SPLIT>
+chmod u+w ./ open.test-contexts.txt.gz
+mv open.test-contexts.txt.gz open.test-contexts.txt.gz.bak
+zcat open.test-contexts.txt.gz.bak | shuf | gzip > open.test-contexts.txt.gz
+ipython
+
+IPYTHON
+-------
+
+import gzip
+from irt2.dataset import IRT2
+from collections import Counter
+from ktz.string import encode_line
+from dataclasses import astuple
+
+irt2 = IRT2.from_dir('.')
+
+out = gzip.open('new', mode='wb')
+_contexts = irt2.open_contexts_test()
+
+counts = Counter()
+with _contexts as contexts, out:
+    for context in contexts:
+
+        if counts[context.mid] >= 100:
+            continue
+
+        counts[context.mid] += 1
+        out.write(encode_line(astuple(context), fn=str, sep='|'))
+
+
+BASH
+----
+
+# check stuff and note metrics in spreadsheet
+mv new open.test-contexts.txt.gz
+chmod u-w ./ *
