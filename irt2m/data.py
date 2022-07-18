@@ -467,9 +467,9 @@ class TokenCache:
         return self.tokens.exists() and self.meta.exists()
 
     @classmethod
-    def create(cls, hashv: str):
+    def create(cls, cachedir, hashv: str):
         """Create a new cache."""
-        cached = kpath(irt2m.ENV.DIR.CACHE / "irt2m.data", create=True)
+        cached = kpath(cachedir / ".cache", create=True)
 
         tokens = cached / f"rings.{hashv}.txt.gz"
         meta = cached / f"rings.{hashv}.pk"
@@ -711,12 +711,14 @@ class RingDataset(td.Dataset):
             self.keyname,
         )
 
+        cachedir = self.irt2.path / ".cache"
+
         threshold = self.max_contexts_per_sample
         if threshold:
             log.info(f"requiring pruned contexts (max: {threshold})")
             hashv = args_hash(threshold, *hashargs)
 
-            pruned_cache = TokenCache.create(hashv)
+            pruned_cache = TokenCache.create(cachedir, hashv)
             if pruned_cache.exists:
                 log.info("cache hit! loading pruned contexts")
                 return self._init_from_cache(pruned_cache)
@@ -725,7 +727,7 @@ class RingDataset(td.Dataset):
         hashv = args_hash(*hashargs)
 
         # either retrieve from cache
-        cache = TokenCache.create(hashv)
+        cache = TokenCache.create(cachedir, hashv)
         if cache.exists:
             log.info("cache hit! loading contexts")
             rings, stats = self._init_from_cache(cache)
@@ -747,7 +749,7 @@ class RingDataset(td.Dataset):
         self,
         irt2: IRT2,
         tokenizer: tf.BertTokenizer,
-        config: Config,
+        config: Config,  # TODO remove
         kind: Kind,
         seed: int = None,
         contexts_per_sample: int = None,
