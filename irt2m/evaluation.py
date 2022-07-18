@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """Evaluate models."""
 
+import abc
 import csv
 import logging
 import pickle
 import re
+import sys
 import textwrap
 from collections import defaultdict
 from datetime import datetime
@@ -12,7 +14,6 @@ from functools import cached_property, partial
 from pathlib import Path
 from typing import Optional
 
-import h5py
 import torch
 import yaml
 from irt2.dataset import IRT2
@@ -90,7 +91,7 @@ class ProjectorData:
                 "\nValidation (Top 5):",
                 tabulate(
                     tablerows,
-                    headers=map(lambda s: s[:5], tablehead),
+                    headers=map(lambda s: s[:10], tablehead),
                     floatfmt="2.3f",
                 ),
             ]
@@ -197,14 +198,8 @@ class ProjectorData:
 
         return path
 
-    def load(self, checkpoint: str = None):
-        log.info("loading checkpoint")
-
-        print("loading IRT2...")
-        irt2 = IRT2.from_dir(self.config["irt2"])
-        print(f"loaded {irt2}")
-
-        print("loading module...")
+    def load(self, irt2: IRT2, checkpoint: str = None):
+        print("loading projector datamodule...")
         module = data.ProjectorModule(irt2, self.config)
 
         checkpoint = self._get_checkpoint(checkpoint)
@@ -219,7 +214,7 @@ class ProjectorData:
             **self.config.get("model_kwargs", {}),
         )
 
-        return irt2, checkpoint, module, model
+        return checkpoint, module, model
 
 
 def create_projections(
@@ -243,6 +238,7 @@ def create_projections(
     )
 
     print(">> dataloader:", dl_kwargs)
+    print(">> ! LOADING ALL SAMPLES FROM TEST")
 
     loaders = {
         "closed-world (train)": data.ProjectorLoader(
@@ -273,7 +269,7 @@ def create_projections(
                 tokenizer=module.tokenizer,
                 config=config,
                 kind="test",
-                **ds_kwargs,
+                **ds_kwargs | dict(max_contexts_per_sample=None),
             ),
             collate_fn=data.VertexFlatDataset.collate_fn,
             **dl_kwargs,
@@ -302,7 +298,7 @@ def create_projections(
     return model.projections, model.projections_counts
 
 
-class EvaluationResult:
+class EvaluationResult(abc.ABC):
 
     irt2: IRT2
     data: ProjectorData
@@ -311,11 +307,84 @@ class EvaluationResult:
     model: models.Projector
     module: data.ProjectorModule
 
-    kgc_results: dict
+    linking_results: dict
     ranking_results: dict
 
-    def _init_projections(self, device, batch_size):
-        name = f"{self.checkpoint.stem}.projections.pkl"
+    def __init__(
+        self,
+        irt2,
+        source,
+        batch_size: Optional[int] = None,
+        checkpoint: Optional[str] = None,
+    ):
+        source = kpath(source, is_dir=True)
+        self.data = ProjectorData(path=source)
+
+        prefix = "  "
+        print("Loaded:")
+        print(textwrap.indent(str(self.data.description), prefix))
+        print()
+
+        self.data.config["mode"] = "probe"
+
+        # initialize model and data
+
+        self.irt2 = IRT2.from_dir(irt2)
+        _irt2 = IRT2.from_dir(self.data.config["irt2"])
+        assert _irt2.name == self.irt2.name, "wrong IRT2 dataset"
+
+        self.checkpoint, self.module, self.model = self.data.load(self.irt2, checkpoint)
+        device = device = torch.device("cuda")
+
+        self.model = self.model.to(device)
+        self.model.ensure_device()
+        self.model.eval()
+
+        if batch_size is None:
+            batch_size = self.data.config["module"]["valid_loader_kwargs"]["batch_size"]
+
+        cached = self.init(device, batch_size)
+        self.run_evaluation(force=not cached)
+
+    @abc.abstractmethod
+    def init(device, batch_size):
+        pass
+
+    @abc.abstractmethod
+    def run_evaluation(force: bool = False):
+        pass
+
+    # --
+
+    def _irt2_rows(self, results):
+        rows = []
+
+        ordered = [
+            eval.key
+            for eval in [
+                models.Evaluation.irt2_inductive,
+                models.Evaluation.irt2_test,
+            ]
+        ]
+
+        for key in ordered:
+            metrics = results[key]
+            prefix = "all.micro"
+            rows.append(
+                (
+                    key,
+                    drslv(metrics, f"{prefix}.hits_at_1") * 100,
+                    drslv(metrics, f"{prefix}.hits_at_10") * 100,
+                    drslv(metrics, f"{prefix}.mrr") * 100,
+                )
+            )
+
+        return rows
+
+
+class LinkingEvaluationResult(EvaluationResult):
+    def init(self, device, batch_size):
+        name = f"{self.checkpoint.stem}.linking.projections.pkl"
         cache = kpath(self.data.path / SUBDIR, create=True) / name
 
         if cache.exists():
@@ -352,20 +421,20 @@ class EvaluationResult:
 
         return cached
 
-    def _run_kgc_evaluation(self, force: bool = False):
+    def run_evaluation(self, force: bool = False):
         # both run pykeen and irt2 evaluations
         path = kpath(self.data.path / SUBDIR, create=True)
-        cache = path / f"{self.checkpoint.stem}.metrics.kgc.yaml"
+        cache = path / f"{self.checkpoint.stem}.metrics.linking.yaml"
 
         if not force and cache.exists():
-            print("loading kgc results from cache")
+            print("loading linking results from cache")
 
             with cache.open(mode="r") as fd:
                 results = yaml.safe_load(fd)
-                self.kgc_results = results
+                self.linking_results = results
                 return
 
-        print("cache miss! running kgc evaluation")
+        print("cache miss! running linking evaluation")
 
         evaluations = [
             models.Evaluation.irt2_inductive,
@@ -383,160 +452,30 @@ class EvaluationResult:
                 name = f"{self.checkpoint.stem}.scores.{which.split}.h5"
                 kwargs = dict(out=path / name)
 
-            res = self.model.run_kgc_evaluation(which, **kwargs)
+            res = self.model.run_linking_evaluation(which, **kwargs)
             results[which.key] = res.to_dict()
 
         with cache.open(mode="w") as fd:
             yaml.safe_dump(results, fd)
 
-        self.kgc_results = results
-
-    def _create_ranks(self, gt, task, scores):
-        # TODO slow and memory expensive!
-
-        predictions = defaultdict(set)
-        for i, (idx, rid) in enumerate(task):
-            mid = self.model.kgc.idx2mid[idx]
-
-            for vid, score in enumerate(scores[i]):
-                if (vid, rid) in gt:
-                    predictions[(vid, rid)].add((mid, score))
-
-        return predictions
-
-    def _run_ranking_evaluation(self, force: bool = False):
-        # assumes run_kgc_evaluation was executed before
-        # there exists a file with all rankings now
-        path = kpath(self.data.path / SUBDIR, create=True)
-        cache = path / f"{self.checkpoint.stem}.metrics.ranking.yaml"
-        if not force and cache.exists():
-            print("loading ranking results from cache")
-
-            with cache.open(mode="r") as fd:
-                results = yaml.safe_load(fd)
-                self.ranking_results = results
-                return
-
-        print("cache miss! running ranking evaluation")
-
-        # (!) attention: the kgc head task corresponds
-        # to the ranking tails task
-        tasks = {
-            models.Evaluation.irt2_inductive: dict(
-                head=self.irt2.open_ranking_val_tails,
-                tail=self.irt2.open_ranking_val_heads,
-            ),
-            models.Evaluation.irt2_test: dict(
-                head=self.irt2.open_ranking_test_tails,
-                tail=self.irt2.open_ranking_test_heads,
-            ),
-        }
-
-        results = {}
-        for which in tasks:
-            name = f"{self.checkpoint.stem}.scores.{which.split}.h5"
-            path = self.data.path / SUBDIR / name
-            h5 = h5py.File(path, "r")
-
-            rank_kwargs = {}
-            for kind, grp in ((kind, h5[kind]) for kind in ("head", "tail")):
-
-                logits = torch.from_numpy(grp["scores"][:])  # N x T
-                probs = torch.nn.functional.softmax(logits, dim=1)  # N x T
-                scores = (logits * probs).numpy()
-                print(f"  - {which.split} {kind} for {scores.shape} scores")
-
-                gt = tasks[which][kind]
-                predictions = self._create_ranks(gt, grp["tasks"][:], scores)
-                ranks = Ranks(gt).add_dict(predictions)
-                print(f"  - got {len(predictions)} predictions")
-
-                rank_kwargs[kind] = (ranks, gt)
-            results[which.key] = RankEvaluator(**rank_kwargs).compute_metrics()
-
-        with cache.open(mode="w") as fd:
-            yaml.safe_dump(results, fd)
-
-        self.ranking_results = results
-
-    def __init__(
-        self,
-        source,
-        batch_size: Optional[int] = None,
-        checkpoint: Optional[str] = None,
-    ):
-        source = kpath(source, is_dir=True)
-        self.data = ProjectorData(path=source)
-
-        prefix = "  "
-        print("Loaded:")
-        print(textwrap.indent(str(self.data.description), prefix))
-        print()
-
-        self.data.config["mode"] = "probe"
-
-        # initialize model and data
-
-        self.irt2, self.checkpoint, self.module, self.model = self.data.load(checkpoint)
-        device = device = torch.device("cuda")
-
-        self.model = self.model.to(device)
-        self.model.ensure_device()
-        self.model.eval()
-
-        if batch_size is None:
-            batch_size = self.data.config["module"]["valid_loader_kwargs"]["batch_size"]
-
-        cached = self._init_projections(device, batch_size)
-
-        self._run_kgc_evaluation(force=not cached)
-        self._run_ranking_evaluation(force=not cached)
-
-    # ---
+        self.linking_results = results
 
     def __str__(self):
         trail = "irt2_test.all.micro.hits_at_10"
-        kgc_hits = drslv(self.kgc_results, trail)
-        ranking_hits = drslv(self.ranking_results, trail)
+        linking_hits = drslv(self.linking_results, trail)
 
         return (
             f"Ranking of {self.data.config['prefix']} {self.checkpoint.stem}:"
-            f" KGC {kgc_hits * 100:2.3f}"
-            f" Ranking {ranking_hits * 100:2.3f}"
+            f" LINKING {linking_hits * 100:2.3f}"
         )
 
-    def _irt2_rows(self, results):
-        rows = []
-
-        ordered = [
-            eval.key
-            for eval in [
-                models.Evaluation.irt2_inductive,
-                models.Evaluation.irt2_test,
-            ]
-        ]
-
-        for key in ordered:
-            metrics = results[key]
-            prefix = "all.micro"
-            rows.append(
-                (
-                    key,
-                    drslv(metrics, f"{prefix}.hits_at_1") * 100,
-                    drslv(metrics, f"{prefix}.hits_at_10") * 100,
-                    drslv(metrics, f"{prefix}.mrr") * 100,
-                )
-            )
-
-        return rows
-
     @property
-    def kgc_table(self) -> str:
+    def table(self) -> str:
         rows = []
 
         # irt2
 
-        rows += self._irt2_rows(self.kgc_results)
+        rows += self._irt2_rows(self.linking_results)
 
         # pykeen
 
@@ -570,37 +509,249 @@ class EvaluationResult:
 
         return textwrap.indent("\n" + table, prefix="  ")
 
-    @property
-    def ranking_table(self):
-        rows = self._irt2_rows(self.ranking_results)
-        table = tabulate(
-            rows,
-            headers=["", "both h@1", "both h@10", "both mrr"],
-            floatfmt="2.3f",
+
+def _add_predictions(preds, score_batch, relations, targets):
+    # add both head and tail predictions
+    for score_dic in score_batch:
+        for direction, (sample, scoremat) in score_dic.items():
+            probs = torch.nn.functional.softmax(scoremat, dim=1)
+
+            top1 = torch.argmax(probs, dim=1)
+            dim0 = torch.arange(probs.shape[0])
+
+            # head task: 80=hong kong, 1=country of citizenship
+            # -> find people living in hong kong
+
+            vids = targets[top1].tolist()
+            scores = probs[dim0, top1].tolist()
+            rels = relations.tolist()
+
+            for vid, rel, score in zip(vids, rels, scores):
+                dic = preds[direction][(vid, rel)]
+
+                # skip already predicted nodes if the score is lower
+                if sample.key in dic and dic[sample.key] < score:
+                    continue
+
+                dic[sample.key] = score
+
+
+def create_predictions(
+    config,
+    irt2,
+    model,
+    module,
+    device,
+    batch_size,
+):
+    ds_kwargs = config["module"]["valid_ds_kwargs"]
+    print(">> dataset: ", ds_kwargs)
+
+    # evaluate projections like they were trained
+    dl_kwargs = config["module"]["train_loader_kwargs"]
+
+    dl_kwargs |= dict(
+        shuffle=False,
+        batch_size=batch_size,
+        subbatch_size=batch_size,
+    )
+
+    print(">> dataloader:", dl_kwargs)
+    print(">> loading all samples from test!")
+
+    loaders = {
+        "open-world (validation)": data.ProjectorLoader(
+            data.MentionFlatDataset(
+                irt2=irt2,
+                tokenizer=module.tokenizer,
+                config=config,
+                kind="valid",
+                **ds_kwargs,
+            ),
+            collate_fn=data.VertexFlatDataset.collate_fn,
+            **dl_kwargs,
+        ),
+        "open-world (test)": data.ProjectorLoader(
+            data.MentionFlatDataset(
+                irt2=irt2,
+                tokenizer=module.tokenizer,
+                config=config,
+                kind="test",
+                **ds_kwargs | dict(max_contexts_per_sample=None),
+            ),
+            collate_fn=data.VertexFlatDataset.collate_fn,
+            **dl_kwargs,
+        ),
+    }
+
+    prediction = {
+        name: dict(
+            head=defaultdict(dict),
+            tail=defaultdict(dict),
+        )
+        for name in loaders
+    }
+
+    targets = model.kgc.closed_world_idxs.to(device=device)
+
+    with torch.no_grad():
+        model.clear_projections()
+        relations = model.kgc.relation_idxs
+
+        for name, loader in loaders.items():
+            gen = tqdm(
+                loader,
+                desc=f"{name}",
+                unit=" batches",
+                total=len(loader),
+            )
+
+            print(f"\n{loader.dataset.description}\n\n")
+            for batch in gen:
+                batch = module.transfer_batch_to_device(batch, device, 0)
+                score_batch = model.score(batch, relations, targets)
+                _add_predictions(
+                    prediction[name],
+                    score_batch,
+                    relations,
+                    targets,
+                )
+
+    return {
+        name: {  # name: validation, test
+            direction: {  # direction: head, tail
+                # defaultdict[dict] -> dict[tuple] (for irt2.evaluation.Ranks)
+                task: tuple(tups.items())
+                for task, tups in preds.items()
+            }
+            for direction, preds in dic.items()
+        }
+        for name, dic in prediction.items()
+    }
+
+
+class RankingEvaluationResult(EvaluationResult):
+
+    # TODO assert not masked
+
+    def init(self, device, batch_size):
+        name = f"{self.checkpoint.stem}.ranking.predictions.pkl"
+        cache = kpath(self.data.path / SUBDIR, create=True) / name
+
+        if cache.exists():
+            print("loading ranking predictions from cache")
+
+            with cache.open(mode="rb") as fd:
+                self.preds = pickle.load(fd)
+                cached = True
+
+        else:
+            print("cache miss! create predictions")
+
+            self.preds = create_predictions(
+                self.data.config,
+                self.irt2,
+                self.model,
+                self.module,
+                device,
+                batch_size,
+            )
+
+            with cache.open(mode="wb") as fd:
+                pickle.dump(self.preds, fd)
+
+            cached = False
+
+        return cached
+
+    def run_evaluation(self, force: bool = False):
+        tqdm_kwargs = dict(
+            leave=False,
+            ncols=data.TERM_WIDTH,
+            file=sys.stdout,
         )
 
-        return textwrap.indent("\n" + table, prefix="  ")
+        mapping = (
+            ("open-world (validation)", "head", self.irt2.open_ranking_val_heads),
+            ("open-world (validation)", "tail", self.irt2.open_ranking_val_tails),
+            ("open-world (test)", "head", self.irt2.open_ranking_test_heads),
+            ("open-world (test)", "tail", self.irt2.open_ranking_test_tails),
+        )
+
+        rankdic = {}
+        for split, direction, gt in mapping:
+            print(f"adding ranks for {split} - {direction=}...")
+            preds = self.preds[split][direction]
+
+            ranks = Ranks(gt).add_dict(
+                {task: tups for task, tups in preds.items() if task in gt},
+                progress=True,
+                progress_kwargs=tqdm_kwargs,
+            )
+
+            rankdic[split][direction] = (ranks, gt)
+
+        results = {}
+        for split, ranks in rankdic.items():
+            evaluator = RankEvaluator(**ranks)
+            results[split] = evaluator.compute_metrics()
+
+        breakpoint()
+
+        return results
+        # raise NotImplementedError()
+
+    @property
+    def table(self):
+        return "TODO .table"
+
+    def __str__(self):
+        return "TODO str"
+
+    # ---
 
 
-def projector(
+def linking(
+    irt2: str,
     source: str,
     batch_size: Optional[int] = None,
     checkpoint: Optional[str] = None,
 ):
     print(irt2m.banner)
-    log.info(f"run kgc evaluation for {source}")
+    log.info(f"run evaluation for {source}")
 
-    result = EvaluationResult(
+    result = LinkingEvaluationResult(
+        irt2,
         source,
         batch_size=batch_size,
         checkpoint=checkpoint,
     )
 
-    print("\nKGC TASK")
-    print(result.kgc_table)
+    print("\nLINKING TASK")
+    print(result.table)
 
-    print("\nRanking TASK")
-    print(result.ranking_table)
+
+def ranking(
+    irt2: str,
+    source: str,
+    batch_size: Optional[int] = None,
+    checkpoint: Optional[str] = None,
+):
+    print(irt2m.banner)
+    log.info(f"run evaluation for {source}")
+
+    result = RankingEvaluationResult(
+        irt2,
+        source,
+        batch_size=batch_size,
+        checkpoint=checkpoint,
+    )
+
+    print("\nRANKING TASK")
+    print(result.table)
+
+
+# ---
 
 
 def _dic2row(dic, mapping):
@@ -643,16 +794,16 @@ def _config_row(result):
     return additional | config
 
 
-def _report_kgc_row(result):
+def _report_linking_row(result):
     row = {}
 
     row |= _prefix_row(result)
-    row |= _irt2row(result.kgc_results, "irt2_test", "micro")
-    row |= _irt2row(result.kgc_results, "irt2_inductive", "micro")
+    row |= _irt2row(result.linking_results, "irt2_test", "micro")
+    row |= _irt2row(result.linking_results, "irt2_inductive", "micro")
     row |= _config_row(result)
 
-    kgcrow = _dic2row(
-        result.kgc_results,
+    linking_row = _dic2row(
+        result.linking_results,
         {
             "kgc_test h@1": "kgc_test.both.realistic.hits_at_1",
             "kgc_test h@10": "kgc_test.both.realistic.hits_at_10",
@@ -664,10 +815,10 @@ def _report_kgc_row(result):
             "kgc_train h@10": "kgc_train.both.realistic.hits_at_10",
         },
     )
-    row |= {k: v * 100 for k, v in kgcrow.items()}
+    row |= {k: v * 100 for k, v in linking_row.items()}
 
-    row |= _irt2row(result.kgc_results, "irt2_test", "macro")
-    row |= _irt2row(result.kgc_results, "irt2_inductive", "macro")
+    row |= _irt2row(result.linking_results, "irt2_test", "macro")
+    row |= _irt2row(result.linking_results, "irt2_inductive", "macro")
 
     # supplemental
 
@@ -700,19 +851,21 @@ def _report_ranking_row(result):
 
 
 def create_report(folder: str):
+    assert False, "TODO LINKINGEvaluationResult and RankingEvaluationResult"
+
     folder = kpath(folder, is_dir=True)
     glob = list(map(lambda p: p.parent, folder.glob("**/checkpoints")))
 
     print(f"loading {len(glob)} results")
 
-    scenarios = dict(kgc=[], ranking=[])
+    scenarios = dict(linking=[], ranking=[])
     for source in glob:
         source = kpath(source, is_dir=True)
         result = EvaluationResult(source)
 
         print(textwrap.indent(str(result), prefix="  - "))
 
-        scenarios["kgc"].append(_report_kgc_row(result))
+        scenarios["linking"].append(_report_linking_row(result))
         scenarios["ranking"].append(_report_ranking_row(result))
 
     for scenario, rows in scenarios.items():

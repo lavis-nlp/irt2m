@@ -208,7 +208,12 @@ def grp_evaluate():
     pass
 
 
-@grp_evaluate.command(name="projector")
+@grp_evaluate.command(name="linking")
+@click.option(
+    "--irt2",
+    required=True,
+    help="irt2 dataset to load",
+)
 @click.option(
     "--source",
     type=str,
@@ -227,9 +232,38 @@ def grp_evaluate():
     required=False,
     help="batch-size, otherwise use validation batch size",
 )
-def evaluate_projector(**kwargs):
-    """Evaluate a projector model."""
-    evaluation.projector(**kwargs)
+def evaluate_linking(**kwargs):
+    """Evaluate a projector model for linking."""
+    evaluation.linking(**kwargs)
+
+
+@grp_evaluate.command(name="ranking")
+@click.option(
+    "--irt2",
+    required=True,
+    help="irt2 dataset to load",
+)
+@click.option(
+    "--source",
+    type=str,
+    required=True,
+    help="directory defined in config['out']",
+)
+@click.option(
+    "--checkpoint",
+    type=str,
+    required=False,
+    help="checkpoint name (e.g. last.ckpt); otherwise load best",
+)
+@click.option(
+    "--batch-size",
+    type=int,
+    required=False,
+    help="batch-size, otherwise use validation batch size",
+)
+def evaluate_ranking(**kwargs):
+    """Evaluate a projector model for ranking."""
+    evaluation.ranking(**kwargs)
 
 
 @grp_evaluate.command(name="create-report")
