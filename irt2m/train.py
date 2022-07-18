@@ -6,6 +6,7 @@ import random
 import sys
 import traceback
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -14,7 +15,9 @@ import pykeen.pipeline
 import pytorch_lightning as pl
 import yaml
 from irt2.dataset import IRT2
-from ktz.collections import dmerge, drslv, ryaml
+from ktz.collections import dmerge
+from ktz.collections import drslv as _drslv
+from ktz.collections import ryaml
 from ktz.filesystem import path as kpath
 from pytorch_lightning.callbacks.progress import tqdm_progress
 from pytorch_lightning.loggers import WandbLogger
@@ -24,7 +27,7 @@ from irt2m import data
 from irt2m.models import MODELS
 
 log = logging.getLogger(__name__)
-
+drslv = partial(_drslv, sep=".")
 
 # --
 
@@ -419,10 +422,29 @@ def _init_callbacks(config, debug):
     return callbacks
 
 
+def _setopt(config, trail, value):
+    opt = drslv(config, trail, skiplast=1)
+    opt[trail.split(".")[-1]] = value
+    log.info(f"overwrite >[{trail}]< with {value}")
+
+
+def _recalculate_batch_size(config, trail, new_cps):
+    old_cps = drslv(config, trail)
+    kind = "train" if "train" in trail else "valid"
+    bs_trail = f"module.{kind}_loader_kwargs.batch_size"
+    old_bs = drslv(config, bs_trail)
+    new_bs = old_bs * max(1, old_cps // new_cps)
+
+    log.info(f"recalculated {kind} batch size: {old_bs} -> {new_bs}")
+    _setopt(config, bs_trail, new_bs)
+
+
 # see cli.train_projector
 def _overwrite_config(config, **overwrites):
     mapping = [
         ("mode", "mode"),
+        ("contexts_per_sample", "module.train_ds_kwargs.contexts_per_sample"),
+        ("contexts_per_sample", "module.valid_ds_kwargs.contexts_per_sample"),
         ("max_contexts_per_sample", "module.train_ds_kwargs.max_contexts_per_sample"),
         ("max_contexts_per_sample", "module.valid_ds_kwargs.max_contexts_per_sample"),
         ("masked", "module.train_ds_kwargs.masking"),
@@ -438,10 +460,13 @@ def _overwrite_config(config, **overwrites):
     for cli_opt, trail in mapping:
         if cli_opt in overwrites and overwrites[cli_opt] is not None:
 
-            opt = drslv(config, trail, sep=".", skiplast=1)
-            opt[trail.split(".")[-1]] = overwrites[cli_opt]
+            value = overwrites[cli_opt]
 
-            log.info(f"overwrite >[{trail}]< with {overwrites[cli_opt]}")
+            # recalculate batch size for multi context models if necessary
+            if cli_opt == "contexts_per_sample":
+                _recalculate_batch_size(config, trail, value)
+
+            _setopt(config, trail, value)
 
 
 def _set_mode(config):
@@ -452,9 +477,9 @@ def _set_mode(config):
         trainconf["fast_dev_run"] = True
 
     if config["mode"] == "limited":
-        trainconf["limit_train_batches"] = 500
-        trainconf["limit_val_batches"] = 10
-        trainconf["max_epochs"] = 2
+        trainconf["limit_train_batches"] = 50
+        trainconf["limit_val_batches"] = 50
+        trainconf["max_epochs"] = 5
 
 
 def projector(config: list[str], **overwrites):

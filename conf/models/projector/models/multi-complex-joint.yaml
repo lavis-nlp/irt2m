@@ -2,6 +2,7 @@
 model: multi context complex joint
 model_kwargs:
   embedding_dim: 500
+  loss: cross entropy
   regularizer: LPRegularizer
   regularizer_kwargs:
     p: 2.0
@@ -20,8 +21,12 @@ evaluations:
 #
 # contexts_per_sample is the amount of text contexts
 # subbatch_size is batch_size if None
+#
+# provide the maximum expected contexts_per_sample here to allow
+# for batch-size recalculation if --contexts-per-sample is overwritten
+# via cli!
 module:
-  train_ds: vertex triple ringbuffer
+  train_ds: vertex entity ringbuffer
   train_ds_kwargs:
     seed: 5012022
     contexts_per_sample: 10  # per batch

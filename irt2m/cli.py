@@ -139,11 +139,18 @@ def train_kgc(**kwargs):
     help="how many epochs to train",
 )
 @click.option(
+    "--contexts-per-sample",
+    type=int,
+    multiple=False,
+    required=False,
+    help="overwrites contexts per sample for both training and validation",
+)
+@click.option(
     "--max-contexts-per-sample",
     type=int,
     multiple=False,
     required=False,
-    help="overwrites max contexts per sample for the training dataset",
+    help="overwrites max contexts per sample for both training and validation",
 )
 @click.option(
     "--masked",
