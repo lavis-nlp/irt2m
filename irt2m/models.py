@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Different baseline models for IRT2."""
 
+import abc
 import enum
 import logging
 import sys
@@ -365,7 +366,7 @@ class IRT2Evaluator:
 # --
 
 
-class Projector(pl.LightningModule):
+class Projector(abc.ABC, pl.LightningModule):
     """Base model with common functionality."""
 
     irt2: IRT2
@@ -851,18 +852,27 @@ class Projector(pl.LightningModule):
     # interface
 
     # batch x tokens x text_dims -> batch x text_dims
+    @abc.abstractmethod
     def aggregate(self, encoded: Tensor) -> Tensor:
         raise NotImplementedError()
 
     # batch x textdims -> [unique] keys x text_dims
+    @abc.abstractmethod
     def reduce(self, aggregated, samples):
         raise NotImplementedError()
 
-    # [unique] keys x kge dims
+    # [unique] keys x text_dims -> [unique] keys x kge dims
+    @abc.abstractmethod
     def project(self, reduced: Tensor) -> Tensor:
         raise NotImplementedError()
 
+    @abc.abstractmethod
     def evaluate_kgc(self, which, **kwargs):
+        raise NotImplementedError()
+
+    # -> batch x relations x targets
+    @abc.abstractmethod
+    def score(self, batch, targets: Tensor):
         raise NotImplementedError()
 
 
@@ -917,10 +927,6 @@ class KGCModel:
     Side note:
       - view_as_complex: N x D x 2 -> N x D
       - view_as_real:    N x D -> N x D x 2
-      - PyKEEN seems to encode it as N x 2D where the data is saved
-        with stride; for a complex vector [c_1, c_2, ...] c_1 = r_1 + i * i_1
-        the view_as_real view would be [[r_1, r_2, ...], [i_1, i_2, ...]]
-        and PyKEEN saves it as [r_1, c_1, r_2, c_2, ...]
 
     See also:
      - https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L353
@@ -1126,6 +1132,45 @@ class KGCProjector(Projector):
 
     def compare(self, projected, target):
         return self.loss(projected, target)
+
+    # [direction -> (sample, rels x targets)]
+    def score(
+        self,
+        batch,
+        relations,
+        targets,
+    ) -> list[dict[Literal["head", "tail"], tuple[data.ProjectorSample, torch.Tensor]]]:
+        E = self.kgc_model.model.entity_representations[0]
+        R = self.kgc_model.model.relation_representations[0]
+
+        tars = E(targets.to(device=self.device))
+        rels = R(relations.to(device=self.device))
+
+        projected, samples = self.forward(batch)
+
+        # interpret as complex like pykeen does:
+        # https://github.com/pykeen/pykeen/blob/v1.8.1/src/pykeen/nn/representation.py#L407
+        _shape = (projected.shape[0],) + E._shape
+        projected = torch.view_as_complex(projected.view(_shape))
+
+        scores = []
+        for projection, sample in zip(projected, samples):
+            ents = projection.repeat(rels.shape[0]).view(rels.shape[0], -1)
+            kwargs = dict(
+                scorer=self.kgc_model.model,
+                ents=ents,
+                rels=rels,
+                targets=tars,
+            )
+
+            scores.append(
+                dict(
+                    head=(sample, f_score(direction="head", **kwargs)),
+                    tail=(sample, f_score(direction="tail", **kwargs)),
+                )
+            )
+
+        return scores
 
     # /interface
     # ----------------------------------------
