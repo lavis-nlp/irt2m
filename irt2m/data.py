@@ -137,6 +137,15 @@ class KGC:
         return max(self.dataset.entity_to_id.values()) + 1
 
     @cached_property
+    def num_relations(self):
+        return self.dataset.num_relations
+
+    @cached_property
+    def relation_idxs(self) -> torch.LongTensor:
+        ids = sorted(self.dataset.relation_to_id.values())
+        return torch.LongTensor(ids)
+
+    @cached_property
     def closed_world_idxs(self) -> torch.LongTensor:
         # simply use the available vids
         # information of dataset.training.entity_ids etc is not usable
@@ -1273,6 +1282,25 @@ class VertexEntityRingbuffer(VertexDataset, RingDataset):
         return header + body
 
     @staticmethod
+    def collate(batch):
+        if len(batch) == 0:
+            return torch.zeros(0), []
+
+        _, padded, samples = RingDataset.collate_fn(batch)
+        return padded, samples
+
+    @staticmethod
+    def transfer(collation, device):
+        th, h_samples, tt, t_samples = collation
+
+        return (
+            th.to(device=device),
+            h_samples,
+            tt.to(device=device),
+            t_samples,
+        )
+
+    @staticmethod
     def collate_fn(
         batch: list[TripleSample],
     ) -> tuple[torch.Tensor, ..., list[TripleSample]]:
@@ -1283,27 +1311,10 @@ class VertexEntityRingbuffer(VertexDataset, RingDataset):
             dest = h if sample.kind == "head" else t
             dest.append(sample)
 
-        def collate(batch):
-            if len(batch) == 0:
-                return torch.zeros(0), []
+        th, h_samples = VertexEntityRingbuffer.collate(h)
+        tt, t_samples = VertexEntityRingbuffer.collate(t)
 
-            _, padded, samples = RingDataset.collate_fn(batch)
-            return padded, samples
-
-        th, h_samples = collate(h)
-        tt, t_samples = collate(t)
-
-        def transfer(collation, device):
-            th, h_samples, tt, t_samples = collation
-
-            return (
-                th.to(device=device),
-                h_samples,
-                tt.to(device=device),
-                t_samples,
-            )
-
-        return transfer, th, h_samples, tt, t_samples
+        return VertexEntityRingbuffer.transfer, th, h_samples, tt, t_samples
 
 
 PROJECTOR_DATASETS = {
