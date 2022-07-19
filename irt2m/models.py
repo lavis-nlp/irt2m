@@ -1490,6 +1490,9 @@ class JointProjector(Projector):
         projected = self.projector(reduced).view(B, -1, 2)
         return complex(projected)
 
+    def score(self, *args, **kwargs):
+        raise NotImplementedError()
+
 
 class SingleComplexJoint(JointProjector):
     def __init__(self, *args, embedding_dim: int = None, **kwargs):
