@@ -16,7 +16,7 @@ out: data/models/{prefix}/{date}
 
 evaluations_kwargs:
   irt2:
-    batch_size: 200
+    batch_size: 100
 
 # there are three modes:
 #    probe:

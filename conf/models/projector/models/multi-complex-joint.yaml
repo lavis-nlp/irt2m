@@ -34,7 +34,7 @@ module:
   train_loader_kwargs:
     shuffle: true
     batch_size: 1
-    subbatch_size: 10
+    subbatch_size: 5
 
   valid_ds: mention ringbuffer
   valid_ds_kwargs:

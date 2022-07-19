@@ -1,8 +1,8 @@
 # use the wandb agent to run the sweep
 # goal: ablation over different context sizes
-name: JMC Random Sweep - Large
+name: JMC Random Sweep - Tiny
 description: Baby don't hurt me
-project: irt2-projector-ng
+project: irt2-projector
 
 method: random
 metric:
@@ -16,9 +16,10 @@ parameters:
     - false
 
   contexts-per-sample:
-    - 10
-    - 20
-    - 40
+    values:
+      - 10
+      - 20
+      - 40
 
   max-contexts-per-sample:
     values:
@@ -54,6 +55,6 @@ command:
   - train
   - projector
   - --config=conf/models/projector/base.yaml
-  - --config=conf/models/projector/data/irt2-cde-large.yaml
+  - --config=conf/models/projector/data/irt2-cde-tiny.yaml
   - --config=conf/models/projector/models/multi-complex-joint.yaml
   - ${args}
