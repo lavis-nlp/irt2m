@@ -924,6 +924,17 @@ class KGCModel:
     real embeddings and in the forward method torch.view_as_complex
     is called (torch.nn.Embedding has no complex number support yet).
 
+    > E = model.entity_representations[0]
+
+    > E(torch.LongTensor([0]))[0][:3]
+    tensor([ 0.0003+0.0077j, -0.0036+0.0023j, -0.0063-0.0063j])
+
+    > E._embeddings.weight[0][:3]
+    tensor([ 0.0003,  0.0077, -0.0036,  0.0023, -0.0063, -0.0063])
+
+    > torch.view_as_complex(E._embeddings.weight.view(E.num_embeddings, -1, 2))[0][:3]
+    tensor([ 0.0003+0.0077j, -0.0036+0.0023j, -0.0063-0.0063j])
+
     Side note:
       - view_as_complex: N x D x 2 -> N x D
       - view_as_real:    N x D -> N x D x 2
@@ -1156,6 +1167,7 @@ class KGCProjector(Projector):
         scores = []
         for projection, sample in zip(projected, samples):
             ents = projection.repeat(rels.shape[0]).view(rels.shape[0], -1)
+
             kwargs = dict(
                 scorer=self.kgc_model.model,
                 ents=ents,
