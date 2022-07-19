@@ -307,9 +307,6 @@ class EvaluationResult(abc.ABC):
     model: models.Projector
     module: data.ProjectorModule
 
-    linking_results: dict
-    ranking_results: dict
-
     def __init__(
         self,
         irt2,
@@ -356,7 +353,7 @@ class EvaluationResult(abc.ABC):
 
     # --
 
-    def _irt2_rows(self, results):
+    def _irt2_rows(self, results, ks):
         rows = []
 
         ordered = [
@@ -370,14 +367,11 @@ class EvaluationResult(abc.ABC):
         for key in ordered:
             metrics = results[key]
             prefix = "all.micro"
-            rows.append(
-                (
-                    key,
-                    drslv(metrics, f"{prefix}.hits_at_1") * 100,
-                    drslv(metrics, f"{prefix}.hits_at_10") * 100,
-                    drslv(metrics, f"{prefix}.mrr") * 100,
-                )
-            )
+
+            hits = tuple(drslv(metrics, f"{prefix}.hits_at_{k}") * 100 for k in ks)
+            mrr = drslv(metrics, f"{prefix}.mrr") * 100
+
+            rows.append((key,) + hits + (mrr,))
 
         return rows
 
@@ -475,7 +469,7 @@ class LinkingEvaluationResult(EvaluationResult):
 
         # irt2
 
-        rows += self._irt2_rows(self.linking_results)
+        rows += self._irt2_rows(self.linking_results, ks=(1, 10))
 
         # pykeen
 
@@ -516,24 +510,38 @@ def _add_predictions(preds, score_batch, relations, targets):
         for direction, (sample, scoremat) in score_dic.items():
             probs = torch.nn.functional.softmax(scoremat, dim=1)
 
-            top1 = torch.argmax(probs, dim=1)
-            dim0 = torch.arange(probs.shape[0])
+            # TODO slow!!
+            for i, rel in enumerate(relations.tolist()):
+                for vid, score in zip(targets.tolist(), probs[i].tolist()):
+                    dic = preds[direction][(vid, rel)]
 
-            # head task: 80=hong kong, 1=country of citizenship
-            # -> find people living in hong kong
+                    # skip already predicted nodes if the score is lower
+                    if sample.key in dic and dic[sample.key] < score:
+                        continue
 
-            vids = targets[top1].tolist()
-            scores = probs[dim0, top1].tolist()
-            rels = relations.tolist()
+                    dic[sample.key] = score
 
-            for vid, rel, score in zip(vids, rels, scores):
-                dic = preds[direction][(vid, rel)]
+            # top1 = torch.argmax(probs, dim=1)
+            # dim0 = torch.arange(probs.shape[0])
 
-                # skip already predicted nodes if the score is lower
-                if sample.key in dic and dic[sample.key] < score:
-                    continue
+            # ranking head task: 80=hong kong, 1=country of citizenship
+            # -> find people living in hong kong (?, 1, 80)
 
-                dic[sample.key] = score
+            # ranking tail task: 968=bob kaufman 3=place of birth
+            # -> what's the birthplace of bob kaufman
+
+            # vids = targets[top1].tolist()
+            # scores = probs[dim0, top1].tolist()
+            # rels = relations.tolist()
+
+            # for vid, rel, score in zip(vids, rels, scores):
+            #     dic = preds[direction][(vid, rel)]
+
+            #     # skip already predicted nodes if the score is lower
+            #     if sample.key in dic and dic[sample.key] < score:
+            #         continue
+
+            #     dic[sample.key] = score
 
 
 def create_predictions(
@@ -671,16 +679,23 @@ class RankingEvaluationResult(EvaluationResult):
             file=sys.stdout,
         )
 
+        valid_key = models.Evaluation.irt2_inductive.key
+        test_key = models.Evaluation.irt2_test.key
+
         mapping = (
-            ("open-world (validation)", "head", self.irt2.open_ranking_val_heads),
-            ("open-world (validation)", "tail", self.irt2.open_ranking_val_tails),
-            ("open-world (test)", "head", self.irt2.open_ranking_test_heads),
-            ("open-world (test)", "tail", self.irt2.open_ranking_test_tails),
+            (valid_key, "head", self.irt2.open_ranking_val_heads),
+            (valid_key, "tail", self.irt2.open_ranking_val_tails),
+            (test_key, "head", self.irt2.open_ranking_test_heads),
+            (test_key, "tail", self.irt2.open_ranking_test_tails),
         )
 
-        rankdic = {}
+        rankdic = defaultdict(dict)
         for split, direction, gt in mapping:
             print(f"adding ranks for {split} - {direction=}...")
+
+            # (!) this is confusing but to solve the head task we
+            # need to use the tail predictions of the kgc models
+            direction = "head" if direction == "tail" else "tail"
             preds = self.preds[split][direction]
 
             ranks = Ranks(gt).add_dict(
@@ -694,19 +709,31 @@ class RankingEvaluationResult(EvaluationResult):
         results = {}
         for split, ranks in rankdic.items():
             evaluator = RankEvaluator(**ranks)
-            results[split] = evaluator.compute_metrics()
+            results[split] = evaluator.compute_metrics(ks=(100,))
 
-        breakpoint()
-
-        return results
-        # raise NotImplementedError()
+        self.ranking_results = results
 
     @property
-    def table(self):
-        return "TODO .table"
+    def table(self) -> str:
+        ks = (100,)
+
+        rows = self._irt2_rows(self.ranking_results, ks=ks)
+        table = tabulate(
+            rows,
+            headers=[""] + ["both h@k" for k in ks] + ["both mrr"],
+            floatfmt="2.3f",
+        )
+
+        return textwrap.indent("\n" + table, prefix="  ")
 
     def __str__(self):
-        return "TODO str"
+        trail = "irt2_test.all.micro.hits_at_100"
+        ranking_hits = drslv(self.ranking_results, trail)
+
+        return (
+            f"Ranking of {self.data.config['prefix']} {self.checkpoint.stem}:"
+            f" RANKING {ranking_hits * 100:2.3f} hits@100"
+        )
 
     # ---
 
