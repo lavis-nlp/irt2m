@@ -63,11 +63,13 @@ class ProjectorData:
     def description(self):
         header = str(self)
         checkpoints = "\n".join([f"  - {path.stem}" for path in self.checkpoints])
-        legacy = "irt2_inductive" not in self.validation
+        # legacy = "irt2_inductive" not in self.validation
 
-        tablehead = "kgc_train", "kgc_transductive", "kgc_inductive"
-        if not legacy:
-            tablehead += ("irt2_inductive",)
+        tablehead = tuple(self.validation)
+        # breakpoint()
+        # tablehead = "kgc_train", "kgc_transductive", "kgc_inductive"
+        # if not legacy:
+        #     tablehead += ("irt2_inductive",)
 
         tablerows = []
         for key in self.validation[tablehead[0]]:
@@ -75,9 +77,9 @@ class ProjectorData:
             tablerows.append(key + row)
 
         # kgc_inductive if legacy else irt2_inductive
-        sortkey = 4 if legacy else 5
+        # sortkey = 4 if legacy else 5
 
-        tablerows.sort(key=lambda t: t[sortkey], reverse=True)  # dsc by h@10
+        # tablerows.sort(key=lambda t: t[sortkey], reverse=True)  # dsc by h@10
         # tablerows.sort(key=lambda t: (t[0], t[1]))  # asc by epoch, step
         tablerows = tablerows[:5]
 
@@ -88,6 +90,7 @@ class ProjectorData:
                 header,
                 "\nCheckpoints:",
                 checkpoints,
+                "\nTODO: fix validation table in .description",
                 "\nValidation (Top 5):",
                 tabulate(
                     tablerows,
@@ -238,7 +241,7 @@ def create_projections(
     )
 
     print(">> dataloader:", dl_kwargs)
-    print(">> ! LOADING ALL SAMPLES FROM TEST")
+    print(">> ! loading all samples from test")
 
     loaders = {
         "closed-world (train)": data.ProjectorLoader(
@@ -280,14 +283,14 @@ def create_projections(
         model.clear_projections()
 
         for name, loader in loaders.items():
+            print(f"\n{loader.dataset.description}\n\n")
+
             gen = tqdm(
                 loader,
                 desc=f"{name}",
                 unit=" batches",
                 total=len(loader),
             )
-
-            print(f"\n{loader.dataset.description}\n\n")
 
             for batch in gen:
                 batch = module.transfer_batch_to_device(batch, device, 0)
@@ -520,7 +523,7 @@ def _add_predictions(preds, score_batch, relations, targets, vid2idx, pred_filte
                 dic = preds[direction][task]
 
                 vid, rel = task
-                score = probs[rel][vid2idx[vid]]
+                score = probs[rel][vid2idx[vid]].item()
 
                 # skip already predicted nodes if the score is lower
                 if sample.key in dic and dic[sample.key] < score:
@@ -606,6 +609,8 @@ def create_predictions(
         relations = model.kgc.relation_idxs
 
         for name, loader in loaders.items():
+            print(f"\n{loader.dataset.description}\n\n")
+
             gen = tqdm(
                 loader,
                 desc=f"{name}",
@@ -613,7 +618,6 @@ def create_predictions(
                 total=len(loader),
             )
 
-            print(f"\n{loader.dataset.description}\n\n")
             for batch in gen:
                 batch = module.transfer_batch_to_device(batch, device, 0)
                 score_batch = model.score(batch, relations, targets)
@@ -627,17 +631,7 @@ def create_predictions(
                     pred_filter[name],
                 )
 
-    return {
-        name: {  # name: validation, test
-            direction: {  # direction: head, tail
-                # defaultdict[dict] -> dict[tuple] (for irt2.evaluation.Ranks)
-                task: tuple(tups.items())
-                for task, tups in preds.items()
-            }
-            for direction, preds in dic.items()
-        }
-        for name, dic in prediction.items()
-    }
+    return prediction
 
 
 class RankingEvaluationResult(EvaluationResult):
@@ -645,6 +639,8 @@ class RankingEvaluationResult(EvaluationResult):
     # TODO assert not masked
 
     def init(self, device, batch_size):
+        assert not drslv(self.data.config, "module.train_ds_kwargs.masking")
+
         name = f"{self.checkpoint.stem}.ranking.predictions.pkl"
         cache = kpath(self.data.path / SUBDIR, create=True) / name
 
@@ -698,8 +694,9 @@ class RankingEvaluationResult(EvaluationResult):
             preds = self.preds[split][direction]
             assert set(preds) == set(gt)
 
-            ranks = Ranks(gt).add_dict(
-                preds,
+            ranks = Ranks(gt).add_iter(
+                # important: use generator to keep RAM usage low
+                ((task, scores.items()) for task, scores in preds.items()),
                 progress=True,
                 progress_kwargs=tqdm_kwargs,
             )

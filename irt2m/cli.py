@@ -267,11 +267,17 @@ def evaluate_ranking(**kwargs):
 
 
 @grp_evaluate.command(name="create-report")
+# @click.option(
+#     "--folder",
+#     type=str,
+#     required=True,
+#     help="directory where **/checkpoints/ can be found",
+# )
 @click.option(
-    "--folder",
-    type=str,
-    required=True,
-    help="directory where **/checkpoints/ can be found",
+    "--batch-size",
+    type=int,
+    required=False,
+    help="batch-size, otherwise use validation batch size",
 )
 def create_evaluation_report(**kwargs):
     """Evaluate a projector model"""
