@@ -459,8 +459,8 @@ class LinkingEvaluationResult(EvaluationResult):
         linking_hits = drslv(self.linking_results, trail)
 
         return (
-            f"Ranking of {self.data.config['prefix']} {self.checkpoint.stem}:"
-            f" LINKING {linking_hits * 100:2.3f}"
+            f"Results of {self.data.config['prefix']} {self.checkpoint.stem}:"
+            f"  Linking {linking_hits * 100:2.3f}"
         )
 
     @property
@@ -504,44 +504,29 @@ class LinkingEvaluationResult(EvaluationResult):
         return textwrap.indent("\n" + table, prefix="  ")
 
 
-def _add_predictions(preds, score_batch, relations, targets):
+def _add_predictions(preds, score_batch, relations, targets, vid2idx, pred_filter):
     # add both head and tail predictions
     for score_dic in score_batch:
         for direction, (sample, scoremat) in score_dic.items():
+
+            # (!) this is confusing but to solve the head task we
+            # need to use the tail predictions of the kgc models
+            direction = "head" if direction == "tail" else "tail"
+
             probs = torch.nn.functional.softmax(scoremat, dim=1)
+            gt = pred_filter[direction]
 
-            # TODO slow!!
-            for i, rel in enumerate(relations.tolist()):
-                for vid, score in zip(targets.tolist(), probs[i].tolist()):
-                    dic = preds[direction][(vid, rel)]
+            for task in gt:
+                dic = preds[direction][task]
 
-                    # skip already predicted nodes if the score is lower
-                    if sample.key in dic and dic[sample.key] < score:
-                        continue
+                vid, rel = task
+                score = probs[rel][vid2idx[vid]]
 
-                    dic[sample.key] = score
+                # skip already predicted nodes if the score is lower
+                if sample.key in dic and dic[sample.key] < score:
+                    continue
 
-            # top1 = torch.argmax(probs, dim=1)
-            # dim0 = torch.arange(probs.shape[0])
-
-            # ranking head task: 80=hong kong, 1=country of citizenship
-            # -> find people living in hong kong (?, 1, 80)
-
-            # ranking tail task: 968=bob kaufman 3=place of birth
-            # -> what's the birthplace of bob kaufman
-
-            # vids = targets[top1].tolist()
-            # scores = probs[dim0, top1].tolist()
-            # rels = relations.tolist()
-
-            # for vid, rel, score in zip(vids, rels, scores):
-            #     dic = preds[direction][(vid, rel)]
-
-            #     # skip already predicted nodes if the score is lower
-            #     if sample.key in dic and dic[sample.key] < score:
-            #         continue
-
-            #     dic[sample.key] = score
+                dic[sample.key] = score
 
 
 def create_predictions(
@@ -568,7 +553,7 @@ def create_predictions(
     print(">> loading all samples from test!")
 
     loaders = {
-        "open-world (validation)": data.ProjectorLoader(
+        models.Evaluation.irt2_inductive.key: data.ProjectorLoader(
             data.MentionFlatDataset(
                 irt2=irt2,
                 tokenizer=module.tokenizer,
@@ -579,7 +564,7 @@ def create_predictions(
             collate_fn=data.VertexFlatDataset.collate_fn,
             **dl_kwargs,
         ),
-        "open-world (test)": data.ProjectorLoader(
+        models.Evaluation.irt2_test.key: data.ProjectorLoader(
             data.MentionFlatDataset(
                 irt2=irt2,
                 tokenizer=module.tokenizer,
@@ -601,6 +586,20 @@ def create_predictions(
     }
 
     targets = model.kgc.closed_world_idxs.to(device=device)
+    vid2idx = {vid: idx for idx, vid in enumerate(targets.tolist())}
+
+    # we only need to retain predictions
+    # for the tasks we want to evaluate
+    pred_filter = {
+        models.Evaluation.irt2_inductive.key: dict(
+            head=set(irt2.open_ranking_val_heads),
+            tail=set(irt2.open_ranking_val_tails),
+        ),
+        models.Evaluation.irt2_test.key: dict(
+            head=set(irt2.open_ranking_test_heads),
+            tail=set(irt2.open_ranking_test_tails),
+        ),
+    }
 
     with torch.no_grad():
         model.clear_projections()
@@ -618,11 +617,14 @@ def create_predictions(
             for batch in gen:
                 batch = module.transfer_batch_to_device(batch, device, 0)
                 score_batch = model.score(batch, relations, targets)
+
                 _add_predictions(
                     prediction[name],
                     score_batch,
                     relations,
                     targets,
+                    vid2idx,
+                    pred_filter[name],
                 )
 
     return {
@@ -693,13 +695,11 @@ class RankingEvaluationResult(EvaluationResult):
         for split, direction, gt in mapping:
             print(f"adding ranks for {split} - {direction=}...")
 
-            # (!) this is confusing but to solve the head task we
-            # need to use the tail predictions of the kgc models
-            direction = "head" if direction == "tail" else "tail"
             preds = self.preds[split][direction]
+            assert set(preds) == set(gt)
 
             ranks = Ranks(gt).add_dict(
-                {task: tups for task, tups in preds.items() if task in gt},
+                preds,
                 progress=True,
                 progress_kwargs=tqdm_kwargs,
             )
@@ -720,7 +720,7 @@ class RankingEvaluationResult(EvaluationResult):
         rows = self._irt2_rows(self.ranking_results, ks=ks)
         table = tabulate(
             rows,
-            headers=[""] + ["both h@k" for k in ks] + ["both mrr"],
+            headers=[""] + [f"both h@{k}" for k in ks] + ["both mrr"],
             floatfmt="2.3f",
         )
 
@@ -877,26 +877,57 @@ def _report_ranking_row(result):
     return row
 
 
-def create_report(folder: str):
-    assert False, "TODO LINKINGEvaluationResult and RankingEvaluationResult"
+def create_report(batch_size: Optional[int] = None):
+    # folder = kpath(folder, is_dir=True)
+    # glob = list(map(lambda p: p.parent, folder.glob("**/checkpoints")))
 
-    folder = kpath(folder, is_dir=True)
-    glob = list(map(lambda p: p.parent, folder.glob("**/checkpoints")))
+    # TODO hard-coded for now, change later
+    sources = (
+        "data/evaluation/PMAC-M/2022-06-28_14-35-23",
+        "data/evaluation/PSAC-M/2022-06-28_11-10-17",
+        "data/evaluation/PSAC-L/2022-06-27_18-20-47",
+        "data/evaluation/PMAC-L/2022-06-29_14-30-56",
+        "data/evaluation/PSAC-S/2022-06-28_02-41-19",
+        "data/evaluation/PMAC-S/2022-07-11_17-47-24",
+        "data/evaluation/PSAC-T/2022-06-27_18-07-43",
+        "data/evaluation/PMAC-T/2022-06-28_09-52-54",
+    )
 
-    print(f"loading {len(glob)} results")
+    datasets = {
+        "L": "large",
+        "M": "medium",
+        "S": "small",
+        "T": "tiny",
+    }
 
-    scenarios = dict(linking=[], ranking=[])
-    for source in glob:
+    scenarios = dict(linking=[])  # , ranking=[])
+    for source in sources:
         source = kpath(source, is_dir=True)
-        result = EvaluationResult(source)
 
-        print(textwrap.indent(str(result), prefix="  - "))
+        dataset = "irt2-cde-" + datasets[source.parent.name[-1]]
+        dataset_linking = kpath(
+            irt2m.ENV.DIR.DATA / "irt2" / (dataset + "-linking"),
+            is_dir=True,
+        )
 
-        scenarios["linking"].append(_report_linking_row(result))
-        scenarios["ranking"].append(_report_ranking_row(result))
+        # dataset_ranking = kpath(
+        #     irt2m.ENV.DIR.DATA / "irt2" / (dataset + "-ranking"),
+        #     is_dir=True,
+        # )
+
+        linking_result = LinkingEvaluationResult(
+            irt2=dataset_linking,
+            source=source,
+            batch_size=batch_size,
+        )
+
+        print(textwrap.indent(str(linking_result), prefix="  - "))
+
+        scenarios["linking"].append(_report_linking_row(linking_result))
+        # scenarios["ranking"].append(_report_ranking_row(result))
 
     for scenario, rows in scenarios.items():
-        out = folder / f"{scenario}.summary.csv"
+        out = irt2m.ENV.DIR.DATA / "evaluation" / f"{scenario}.summary.csv"
         with (out).open(mode="w") as fd:
             writer = csv.DictWriter(fd, fieldnames=list(rows[0]))
             writer.writeheader()
