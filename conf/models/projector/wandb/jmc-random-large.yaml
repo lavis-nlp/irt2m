@@ -4,7 +4,7 @@ name: JMC Random Sweep II - Large
 description: Don't hurt me
 project: irt2-projector
 
-method: random
+method: grid
 metric:
   name: kgc/inductive/hits@10
   goal: maximize
@@ -17,7 +17,7 @@ parameters:
 
   contexts-per-sample:
     values:
-      - 20
+      - 10
       - 40
 
   max-contexts-per-sample:

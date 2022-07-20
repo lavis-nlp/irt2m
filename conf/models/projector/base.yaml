@@ -58,7 +58,7 @@ scheduler_kwargs: {}
 
 trainer:
   gpus: 1
-  max_epochs: 500
+  max_epochs: 800
   check_val_every_n_epoch: 3
 
 
