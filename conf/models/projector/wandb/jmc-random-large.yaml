@@ -1,0 +1,36 @@
+# use the wandb agent to run the sweep
+# goal: ablation over different context sizes
+name: JMC Random Sweep II - Large
+description: Don't hurt me
+project: irt2-projector
+
+method: random
+metric:
+  name: kgc/inductive/hits@10
+  goal: maximize
+
+parameters:
+  masked:
+    values:
+      - true
+      - false
+
+  contexts-per-sample:
+    values:
+      - 20
+      - 40
+
+  max-contexts-per-sample:
+    values:
+      - 100
+      - 1000
+
+program: irt2m
+command:
+  - ${program}
+  - train
+  - projector
+  - --config=conf/models/projector/base.yaml
+  - --config=conf/models/projector/data/irt2-cde-large.yaml
+  - --config=conf/models/projector/models/multi-complex-joint.yaml
+  - ${args}

@@ -1,14 +1,14 @@
 # for available projector models see irt2m.models.PROJECTORS
 model: multi context complex joint
 model_kwargs:
-  embedding_dim: 500
+  embedding_dim: 800
   loss: cross entropy
   regularizer: LPRegularizer
   regularizer_kwargs:
     p: 2.0
-    weight: 0.1
+    weight: 0.01
     normalize: true
-
+  freeze_except: 1
 
 # which kgc evaluations to run while training
 evaluations:
@@ -29,27 +29,27 @@ module:
   train_ds: vertex entity ringbuffer
   train_ds_kwargs:
     seed: 5012022
-    contexts_per_sample: 10  # per batch
+    contexts_per_sample: 40  # per batch
     max_contexts_per_sample: 100
   train_loader_kwargs:
     shuffle: true
-    batch_size: 1
-    subbatch_size: 5
+    batch_size: 2
+    subbatch_size: 40
 
   valid_ds: mention ringbuffer
   valid_ds_kwargs:
     seed: 5012022
-    contexts_per_sample: 10
+    contexts_per_sample: 40
     max_contexts_per_sample: 100
   valid_loader_kwargs:
     shuffle: false
-    batch_size: 30
+    batch_size: 20
 
 # for available optimizers see irt2m.models.OPTIMIZERS
 optimizer: adam
 optimizer_kwargs:
-  lr: 5.0e-05
-  weight_decay: 0.01
+  lr: 5e-6
+  weight_decay: 0.0001
 
 early_stopping: true
 early_stopping_kwargs:
