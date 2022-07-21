@@ -43,12 +43,12 @@ module:
     max_contexts_per_sample: 100
   valid_loader_kwargs:
     shuffle: false
-    batch_size: 20
+    batch_size: 40
 
 # for available optimizers see irt2m.models.OPTIMIZERS
 optimizer: adam
 optimizer_kwargs:
-  lr: 5e-6
+  lr: 5.0e-06
   weight_decay: 0.0001
 
 early_stopping: true

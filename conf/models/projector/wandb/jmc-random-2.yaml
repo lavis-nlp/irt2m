@@ -1,6 +1,6 @@
 # use the wandb agent to run the sweep
 # goal: ablation over different context sizes
-name: JMC Random Sweep II - Large
+name: JMC Grid Sweep II - Small
 description: Don't hurt me
 project: irt2-projector
 
@@ -31,6 +31,6 @@ command:
   - train
   - projector
   - --config=conf/models/projector/base.yaml
-  - --config=conf/models/projector/data/irt2-cde-large.yaml
+  - --config=conf/models/projector/data/irt2-cde-small.yaml
   - --config=conf/models/projector/models/multi-complex-joint.yaml
   - ${args}
