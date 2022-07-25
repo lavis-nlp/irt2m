@@ -232,6 +232,12 @@ def grp_evaluate():
     required=False,
     help="batch-size, otherwise use validation batch size",
 )
+@click.option(
+    "--irt2-batch-size",
+    type=int,
+    required=False,
+    help=" ",
+)
 def evaluate_linking(**kwargs):
     """Evaluate a projector model for linking."""
     evaluation.linking(**kwargs)
@@ -277,7 +283,13 @@ def evaluate_ranking(**kwargs):
     "--batch-size",
     type=int,
     required=False,
-    help="batch-size, otherwise use validation batch size",
+    help="overwrites ",
+)
+@click.option(
+    "--irt2-batch-size",
+    type=int,
+    required=False,
+    help=" ",
 )
 def create_evaluation_report(**kwargs):
     """Evaluate a projector model"""

@@ -38,11 +38,22 @@ drslv = partial(_drslv, sep=".")
 SUBDIR = "evaluation"
 
 
-def hits(dic, k):
-    try:
-        return dic["both"]["realistic"][f"hits_at_{k}"]
-    except KeyError:
-        return 0.0
+def hits(evaluation, dic, k):
+    trail = None
+
+    kgc = {
+        models.Evaluation.kgc_train.key,
+        models.Evaluation.kgc_transductive.key,
+        models.Evaluation.kgc_inductive.key,
+    }
+
+    if evaluation in kgc:
+        trail = f"both.realistic.hits_at_{k}"
+    if evaluation == models.Evaluation.irt2_inductive.key:
+        trail = f"all.micro.hits_at_{k}"
+
+    assert trail, f"add trail for {evaluation}"
+    return drslv(dic, trail, default=-1)
 
 
 def _apply_backports(config: dict):
@@ -56,6 +67,7 @@ class ProjectorData:
     path: Path
     log: str
     config: data.Config
+    monitored_metric: models.Evaluation
     validation: dict[dict[str, dict]]  # kind -> epoch -> results
     checkpoints: list[Path]
 
@@ -63,35 +75,29 @@ class ProjectorData:
     def description(self):
         header = str(self)
         checkpoints = "\n".join([f"  - {path.stem}" for path in self.checkpoints])
-        # legacy = "irt2_inductive" not in self.validation
 
-        tablehead = tuple(self.validation)
-        # breakpoint()
-        # tablehead = "kgc_train", "kgc_transductive", "kgc_inductive"
-        # if not legacy:
-        #     tablehead += ("irt2_inductive",)
-
+        tablehead = ("epoch", "step") + tuple(self.validation)
         tablerows = []
-        for key in self.validation[tablehead[0]]:
-            row = tuple(hits(self.validation[kind][key], k=10) for kind in tablehead)
-            tablerows.append(key + row)
 
-        # kgc_inductive if legacy else irt2_inductive
-        # sortkey = 4 if legacy else 5
+        for key in self.validation[tablehead[2]]:
+            metrics = (
+                hits(kind, self.validation[kind][key], k=10) for kind in tablehead[2:]
+            )
 
-        # tablerows.sort(key=lambda t: t[sortkey], reverse=True)  # dsc by h@10
-        # tablerows.sort(key=lambda t: (t[0], t[1]))  # asc by epoch, step
+            tablerows.append(key + tuple(metrics))
+
+        # dsc by h@10, epoch
+
+        sortkey = tablehead.index(self.monitored_metric.key)
+        tablerows.sort(key=lambda t: (t[sortkey], t[0]), reverse=True)
         tablerows = tablerows[:5]
-
-        tablehead = ("epoch", "step") + tablehead
 
         return "\n".join(
             [
                 header,
                 "\nCheckpoints:",
                 checkpoints,
-                "\nTODO: fix validation table in .description",
-                "\nValidation (Top 5):",
+                f"\nValidation using {self.monitored_metric} (Top 5):",
                 tabulate(
                     tablerows,
                     headers=map(lambda s: s[:10], tablehead),
@@ -100,31 +106,30 @@ class ProjectorData:
             ]
         )
 
-    def best(self, kind: str, k: int = 10):
-        vals = self.validation[kind]
-        gen = ((hits(dic, k=k), epoch) for (epoch, _), dic in vals.items())
+    def best(self, k: int = 10):
+        key = self.monitored_metric.key
+        vals = self.validation[key]
+        gen = ((hits(key, dic, k=k), epoch) for (epoch, _), dic in vals.items())
 
         top = sorted(gen, reverse=True)
         total = max(epoch for _, epoch in top)
 
-        h10, epoch = top[0]
-        return h10, epoch, total
+        hatk, epoch = top[0]
+        return hatk, epoch, total
 
     def __str__(self):
         timestamp = datetime.fromisoformat(self.config["timestamp"])
         prefix = self.config["prefix"]
-
-        # kgc_inductive: legacy (can be removed later)
-        key = "irt2_inductive"
-        key = key if key in self.validation else "kgc_inductive"
-
-        h10, epoch, total = self.best(key)
+        h10, epoch, total = self.best()
 
         return (
             f"Projectors {prefix} {timestamp}"
             f" (best h@10: {h10:2.3f} at epoch {epoch}/{total})"
         )
 
+    # loads pre-irt2 evaluation metrics (if the result directory
+    # contains a "validation" folder it's ng and if there's a
+    # "kg" folder it is legacy
     def _init_legacy_validation(self):
         validation = {"train": {}, "transductive": {}, "inductive": {}}
 
@@ -136,6 +141,7 @@ class ProjectorData:
                 key = int(epoch), int(step)
                 validation[kind][key] = yaml.safe_load(fd)
 
+        self.monitored_metric = models.Evaluation.kgc_inductive
         self.validation = {f"kgc_{k}": v for k, v in validation.items()}
 
     def _init_validation(self):
@@ -145,7 +151,10 @@ class ProjectorData:
             self._init_legacy_validation()
             return
 
-        self.validation = defaultdict(dict)
+        metric = self.config["checkpoint"]["monitor"]
+        self.monitored_metric = models.Evaluation.from_metric(metric)
+
+        validation = defaultdict(dict)
         for glob in path.glob("*.yaml"):
             # expecting file names like epoch=0-step=0.yaml
             _, epoch, _, step = re.split(r"[=\-_]", glob.stem)
@@ -154,9 +163,9 @@ class ProjectorData:
             with glob.open(mode="r") as fd:
                 results = yaml.safe_load(fd)
                 for kind, metrics in results.items():
-                    self.validation[kind][key] = metrics
+                    validation[kind][key] = metrics
 
-        self.validation = dict(self.validation)
+        self.validation = dict(validation)
 
     def __init__(self, path: Path):
         log.info(f"initializing trained projectors from {path}")
@@ -189,7 +198,7 @@ class ProjectorData:
             key = "irt2_inductive"
             key = key if key in self.validation else "kgc_inductive"
 
-            _, epoch, _ = self.best(key)
+            _, epoch, _ = self.best()
 
             globs = list(checkpoints.glob(f"epoch={epoch}*.ckpt"))
             path = globs[0] if len(globs) == 1 else checkpoints / "last.ckpt"
@@ -315,6 +324,7 @@ class EvaluationResult(abc.ABC):
         irt2,
         source,
         batch_size: Optional[int] = None,
+        irt2_batch_size: Optional[int] = None,
         checkpoint: Optional[str] = None,
     ):
         source = kpath(source, is_dir=True)
@@ -341,7 +351,19 @@ class EvaluationResult(abc.ABC):
         self.model.eval()
 
         if batch_size is None:
-            batch_size = self.data.config["module"]["valid_loader_kwargs"]["batch_size"]
+            batch_size = drslv(
+                self.data.config, "module.valid_loader_kwargs.batch_size"
+            )
+
+        if irt2_batch_size is not None:
+            eval_irt2_conf = drslv(
+                self.data.config,
+                "evaluations_kwargs.irt2",
+                default=None,
+            )
+
+            if eval_irt2_conf is not None:
+                eval_irt2_conf["batch_size"] = irt2_batch_size
 
         cached = self.init(device, batch_size)
         self.run_evaluation(force=not cached)
@@ -424,7 +446,7 @@ class LinkingEvaluationResult(EvaluationResult):
         cache = path / f"{self.checkpoint.stem}.metrics.linking.yaml"
 
         if not force and cache.exists():
-            print("loading linking results from cache")
+            print(f"loading linking results from {cache.name}")
 
             with cache.open(mode="r") as fd:
                 results = yaml.safe_load(fd)
@@ -449,10 +471,11 @@ class LinkingEvaluationResult(EvaluationResult):
                 name = f"{self.checkpoint.stem}.scores.{which.split}.h5"
                 kwargs = dict(out=path / name)
 
-            res = self.model.run_linking_evaluation(which, **kwargs)
+            res = self.model.run_kgc_evaluation(which, **kwargs)
             results[which.key] = res.to_dict()
 
         with cache.open(mode="w") as fd:
+            print(f"saving ranking results to {cache.name}")
             yaml.safe_dump(results, fd)
 
         self.linking_results = results
@@ -487,7 +510,7 @@ class LinkingEvaluationResult(EvaluationResult):
         ]
 
         for key in ordered:
-            metrics = self.kgc_results[key]
+            metrics = self.linking_results[key]
             prefix = "both.realistic"
             rows.append(
                 (
@@ -671,6 +694,21 @@ class RankingEvaluationResult(EvaluationResult):
         return cached
 
     def run_evaluation(self, force: bool = False):
+        path = kpath(self.data.path / SUBDIR, create=True)
+        cache = path / f"{self.checkpoint.stem}.metrics.ranking.yaml"
+
+        if not force and cache.exists():
+            print(f"loading ranking results from {cache.name}")
+
+            with cache.open(mode="r") as fd:
+                results = yaml.safe_load(fd)
+                self.ranking_results = results
+                return
+
+        print("cache miss! running ranking evaluation")
+
+        # ---
+
         tqdm_kwargs = dict(
             leave=False,
             ncols=data.TERM_WIDTH,
@@ -706,7 +744,11 @@ class RankingEvaluationResult(EvaluationResult):
         results = {}
         for split, ranks in rankdic.items():
             evaluator = RankEvaluator(**ranks)
-            results[split] = evaluator.compute_metrics(ks=(100,))
+            results[split] = evaluator.compute_metrics(ks=(10, 100))
+
+        with cache.open(mode="w") as fd:
+            print(f"saving ranking results to {cache.name}")
+            yaml.safe_dump(results, fd)
 
         self.ranking_results = results
 
@@ -739,6 +781,7 @@ def linking(
     irt2: str,
     source: str,
     batch_size: Optional[int] = None,
+    irt2_batch_size: Optional[int] = None,
     checkpoint: Optional[str] = None,
 ):
     print(irt2m.banner)
@@ -748,6 +791,7 @@ def linking(
         irt2,
         source,
         batch_size=batch_size,
+        irt2_batch_size=irt2_batch_size,
         checkpoint=checkpoint,
     )
 
@@ -874,57 +918,87 @@ def _report_ranking_row(result):
     return row
 
 
-def create_report(batch_size: Optional[int] = None):
+def create_report(
+    batch_size: Optional[int] = None,
+    irt2_batch_size: Optional[int] = None,
+):
     # folder = kpath(folder, is_dir=True)
     # glob = list(map(lambda p: p.parent, folder.glob("**/checkpoints")))
 
     # TODO hard-coded for now, change later
-    sources = (
-        "data/evaluation/PMAC-M/2022-06-28_14-35-23",
-        "data/evaluation/PSAC-M/2022-06-28_11-10-17",
-        "data/evaluation/PSAC-L/2022-06-27_18-20-47",
-        "data/evaluation/PMAC-L/2022-06-29_14-30-56",
-        "data/evaluation/PSAC-S/2022-06-28_02-41-19",
-        "data/evaluation/PMAC-S/2022-07-11_17-47-24",
-        "data/evaluation/PSAC-T/2022-06-27_18-07-43",
-        "data/evaluation/PMAC-T/2022-06-28_09-52-54",
+    sources = dict(
+        ranking=(
+            # PSAC
+            "data/evaluation/PSAC-T/2022-06-27_18-07-43",
+            "data/evaluation/PSAC-S/2022-06-28_02-41-19",
+            "data/evaluation/PSAC-M/2022-06-28_11-10-17",
+            "data/evaluation/PSAC-L/2022-06-27_18-20-47",
+            # PMAC
+            "data/evaluation/PMAC-T/2022-06-28_09-54-58",
+            "data/evaluation/PMAC-S/2022-06-28_14-08-31",
+            "data/evaluation/PMAC-M/2022-06-28_23-47-21",
+            "data/evaluation/PMAC-L/2022-06-29_14-30-56",
+            # JSC
+            "data/evaluation/JSC-T/2022-07-15_16-28-15",
+            "data/evaluation/JSC-S/2022-07-18_01-46-16",
+            "data/evaluation/JSC-M/2022-07-17_06-15-30",
+            "data/evaluation/JSC-L/2022-07-15_12-03-25",
+        ),
+        linking=(
+            # PSAC
+            "data/evaluation/PSAC-T/2022-06-27_18-07-43",
+            "data/evaluation/PSAC-S/2022-06-28_02-41-19",
+            "data/evaluation/PSAC-M/2022-06-28_11-10-17",
+            "data/evaluation/PSAC-L/2022-06-27_18-20-47",
+            # PMAC
+            "data/evaluation/PMAC-T/2022-06-28_09-52-54",
+            "data/evaluation/PMAC-S/2022-07-11_17-47-24",
+            "data/evaluation/PMAC-M/2022-06-28_14-35-23",
+            "data/evaluation/PMAC-L/2022-06-29_14-30-56",
+            # JSC
+            "data/evaluation/JSC-T/2022-07-15_11-51-35",
+            "data/evaluation/JSC-S/2022-07-18_09-37-00",
+            "data/evaluation/JSC-M/2022-07-17_06-15-30",
+            "data/evaluation/JSC-L/2022-07-15_12-03-25",
+        ),
     )
 
-    datasets = {
+    dataset_map = {
         "L": "large",
         "M": "medium",
         "S": "small",
         "T": "tiny",
     }
 
-    scenarios = dict(linking=[])  # , ranking=[])
-    for source in sources:
-        source = kpath(source, is_dir=True)
+    results = dict(linking=[], ranking=[])
+    for task in sources:
+        for source in sources[task]:
+            source = kpath(source, is_dir=True)
 
-        dataset = "irt2-cde-" + datasets[source.parent.name[-1]]
-        dataset_linking = kpath(
-            irt2m.ENV.DIR.DATA / "irt2" / (dataset + "-linking"),
-            is_dir=True,
-        )
+            dataset = "irt2-cde-" + dataset_map[source.parent.name[-1]]
+            dataset = kpath(
+                irt2m.ENV.DIR.DATA / "irt2" / (dataset + f"-{task}"),
+                is_dir=True,
+            )
 
-        # dataset_ranking = kpath(
-        #     irt2m.ENV.DIR.DATA / "irt2" / (dataset + "-ranking"),
-        #     is_dir=True,
-        # )
+            if task == "linking":
+                Result = LinkingEvaluationResult
+                report = _report_linking_row
+            if task == "ranking":
+                Result = RankingEvaluationResult
+                report = _report_ranking_row
 
-        linking_result = LinkingEvaluationResult(
-            irt2=dataset_linking,
-            source=source,
-            batch_size=batch_size,
-        )
+            result = Result(
+                irt2=dataset,
+                source=source,
+                batch_size=batch_size,
+            )
 
-        print(textwrap.indent(str(linking_result), prefix="  - "))
+            print(textwrap.indent(str(result), prefix="  - "))
+            results[task].append(report(result))
 
-        scenarios["linking"].append(_report_linking_row(linking_result))
-        # scenarios["ranking"].append(_report_ranking_row(result))
-
-    for scenario, rows in scenarios.items():
-        out = irt2m.ENV.DIR.DATA / "evaluation" / f"{scenario}.summary.csv"
+    for task, rows in results.items():
+        out = irt2m.ENV.DIR.DATA / "evaluation" / f"summary.{task}.csv"
         with (out).open(mode="w") as fd:
             writer = csv.DictWriter(fd, fieldnames=list(rows[0]))
             writer.writeheader()
