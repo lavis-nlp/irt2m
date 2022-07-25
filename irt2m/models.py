@@ -138,6 +138,13 @@ class Evaluation(enum.Enum):
     def key(self):
         return self.value.replace("/", "_")
 
+    # --
+
+    @classmethod
+    def from_metric(Self, metric: str):
+        # metrics are of the form "irt2/inductive/all micro hits@10"
+        return Self("/".join(metric.split("/")[:2]))
+
 
 # --
 # bridge to irt2 and mimicking the pykeen evaluator
@@ -1490,8 +1497,44 @@ class JointProjector(Projector):
         projected = self.projector(reduced).view(B, -1, 2)
         return complex(projected)
 
-    def score(self, *args, **kwargs):
-        raise NotImplementedError()
+    # [direction -> (sample, rels x targets)]
+    def score(
+        self,
+        batch,
+        relations,
+        targets,
+    ) -> list[dict[Literal["head", "tail"], tuple[data.ProjectorSample, torch.Tensor]]]:
+
+        E = self.scorer.entity_representations[0]
+        R = self.scorer.relation_representations[0]
+
+        tars = E(targets.to(device=self.device))
+        rels = R(relations.to(device=self.device))
+
+        idxs, samples = batch
+
+        # batch x embedding_dims
+        projected, samples = self.forward((idxs, samples))
+
+        scores = []
+        for projection, sample in zip(projected, samples):
+            ents = projection.repeat(rels.shape[0]).view(rels.shape[0], -1)
+
+            kwargs = dict(
+                scorer=self.scorer,
+                ents=ents,
+                rels=rels,
+                targets=tars,
+            )
+
+            scores.append(
+                dict(
+                    head=(sample, f_score(direction="head", **kwargs)),
+                    tail=(sample, f_score(direction="tail", **kwargs)),
+                )
+            )
+
+        return scores
 
 
 class SingleComplexJoint(JointProjector):
