@@ -1335,7 +1335,7 @@ class JointProjector(Projector):
 
     def _forward_directed(self, direction: Literal["head", "tail"], idxs, samples):
         if not samples:
-            return self.void_f, self.void_c, [], self.void_i
+            return self.void_f, self.void_c, [], self.void_f
 
         # if kind == tail: heads are encoded text
         # if kind == head: tails are encoded text

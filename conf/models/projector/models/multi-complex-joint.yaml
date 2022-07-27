@@ -33,8 +33,8 @@ module:
     max_contexts_per_sample: 100
   train_loader_kwargs:
     shuffle: true
-    batch_size: 2
-    subbatch_size: 40
+    batch_size: 1
+    subbatch_size: 5
 
   valid_ds: mention ringbuffer
   valid_ds_kwargs:
@@ -43,7 +43,7 @@ module:
     max_contexts_per_sample: 100
   valid_loader_kwargs:
     shuffle: false
-    batch_size: 40
+    batch_size: 5
 
 # for available optimizers see irt2m.models.OPTIMIZERS
 optimizer: adam
