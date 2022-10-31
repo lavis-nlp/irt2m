@@ -4,6 +4,14 @@ This repository complements the [IRT2 (Inductive Reasoning with
 Text)](https://github.com/lavis-nlp/irt2) repository and contains the
 code used for training the baseline models presented in the paper.
 
+## Download
+
+You can download each reported model by using the download links in
+the following Google Sheet:
+
+* **[Ranking Models](https://docs.google.com/spreadsheets/d/1_p8nwLsYma7u4BViDORksCOUlmtVNVvHDNDv1-KTBhE/#gid=899849602)**
+* **[Linking Models](https://docs.google.com/spreadsheets/d/1_p8nwLsYma7u4BViDORksCOUlmtVNVvHDNDv1-KTBhE/#gid=153139479)**
+
 
 ## Installation
 
@@ -144,6 +152,14 @@ Options:
   --help                Show this message and exit.
 ```
 
+
+# Cite
+
+If you find our work to be useful, please consider a citation!
+
+```
+COMING SOON
+```
 
 
 # Bibliography
